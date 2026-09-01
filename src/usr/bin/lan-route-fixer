@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+"""Dispatch to the CLI or GUI depending on the first argument."""
+
+import sys
+from pathlib import Path
+
+import os
+LIB_DIR = Path(os.environ.get("LAN_ROUTE_FIXER_LIB", "/usr/lib/lan-route-fixer"))
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+CLI_COMMANDS = {
+    "scan",
+    "check",
+    "fix",
+    "run",
+    "list",
+    "add",
+    "remove",
+    "enable",
+    "disable",
+    "set-interface",
+    "--help",
+    "-h",
+}
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] in CLI_COMMANDS:
+        import core
+
+        return core.cli_main(sys.argv[1:])
+
+    import app
+
+    return app.main()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

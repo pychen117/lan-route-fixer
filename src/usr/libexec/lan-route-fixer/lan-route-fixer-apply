@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Root-level route applier used by NetworkManager dispatcher and systemd.
+
+This script must run as root. It reads every discovered lan-route-fixer config,
+checks the current routes, and repairs only the ones that are wrong.
+"""
+
+import sys
+from pathlib import Path
+
+import os
+LIB_DIR = Path(os.environ.get("LAN_ROUTE_FIXER_LIB", "/usr/lib/lan-route-fixer"))
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+import core
+
+
+def main():
+    try:
+        outcome = core.apply_all_configs()
+    except Exception as exception:
+        print(f"lan-route-fixer-apply: {exception}", file=sys.stderr)
+        return 1
+
+    if outcome.get("return_code") == 0:
+        print(
+            "lan-route-fixer-apply: "
+            f"checked={outcome.get('checked', 0)} fixed={outcome.get('fixed', 0)} failed=0"
+        )
+        return 0
+
+    print(
+        "lan-route-fixer-apply: "
+        f"checked={outcome.get('checked', 0)} fixed={outcome.get('fixed', 0)} "
+        f"failed={outcome.get('failed', 0)} error={outcome.get('stderr', '')}",
+        file=sys.stderr,
+    )
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,19 @@
+Source: lan-route-fixer
+Section: net
+Priority: optional
+Maintainer: pychen117 <pychen117@163.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.7.2
+Rules-Requires-Root: no
+
+Package: lan-route-fixer
+Architecture: all
+Breaks: deskflow-route-fixer
+Replaces: deskflow-route-fixer
+Depends: ${misc:Depends}, python3, python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, pkexec | policykit-1, iproute2, systemd
+Recommends: avahi-utils, network-manager
+Description: keep local devices on the physical network instead of a VPN
+ Lan Route Fixer discovers local devices and lets users select which private
+ IPv4/IPv6 destinations should stay on a physical LAN interface. It provides a
+ GTK4 interface, a command-line mode, automatic monitoring, and a validated
+ PolicyKit helper for privileged route changes.

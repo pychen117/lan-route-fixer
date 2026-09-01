@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""Privileged helper for lan-route-fixer.
+
+It only accepts private/local destinations and a non-tunnel LAN interface, and
+only performs `ip route replace` (no flush/delete, no arbitrary commands).
+The file must remain root-owned and unmodifiable by regular users.
+
+Usage:
+    lan-route-helper <address> <interface>
+    lan-route-helper --batch-json '<json-array>'
+        accepts the route items as a command-line JSON argument so callers do
+        not depend on pkexec forwarding stdin.
+    lan-route-helper --batch
+        legacy mode, reads a JSON array from stdin.
+"""
+
+import ipaddress
+import json
+import os
+import re
+import subprocess
+import sys
+
+IP_BIN = "/usr/sbin/ip"
+NET_BASE = "/sys/class/net"
+
+PRIVATE_V4_NETWORKS = tuple(
+    ipaddress.ip_network(network) for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
+ULA_V6_NETWORK = ipaddress.ip_network("fc00::/7")
+
+VIRTUAL_PREFIXES = (
+    "utun",
+    "tun",
+    "tap",
+    "tailscale",
+    "wg",
+    "ppp",
+    "ipsec",
+    "ovpn",
+    "zerotier",
+    "gpd",
+    "proton",
+    "mullvad",
+    "surfshark",
+)
+VIRTUAL_KINDS = {
+    "tun",
+    "tap",
+    "wireguard",
+    "veth",
+    "dummy",
+    "sit",
+    "ipip",
+    "gre",
+    "vti",
+    "ip6tnl",
+    "macvlan",
+    "ipvlan",
+    "openvpn",
+    "ppp",
+    "ifb",
+    "xfrm",
+    "nlmon",
+    "6lowpan",
+    "lowpan",
+}
+TRUSTED_KINDS = {"bridge", "bond", "vlan"}
+
+
+def fail(message):
+    print(f"lan-route-helper: {message}", file=sys.stderr)
+    sys.exit(64)
+
+
+def run_ip(*args, timeout=5):
+    """Run ip and return (stdout, stderr, returncode).
+
+    A missing binary or timeout is returned as returncode -1 with the exception
+    text in stderr, so callers can report a useful reason instead of a bare
+    "failed to replace route".
+    """
+    try:
+        result = subprocess.run(
+            [IP_BIN, *args],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exception:
+        return "", str(exception), -1
+    return result.stdout, result.stderr.strip(), result.returncode
+
+
+def link_kind(interface):
+    output, _, returncode = run_ip("-d", "-o", "link", "show", interface)
+    if returncode != 0 or not output:
+        return ""
+    match = re.search(
+        r"\b(wireguard|tun|tap|veth|bridge|bond|vlan|dummy|sit|ipip|gre|vti|ip6tnl|macvlan|ipvlan|openvpn|ppp|ifb|xfrm|nlmon|6lowpan|lowpan)\b",
+        output,
+        flags=re.IGNORECASE,
+    )
+    return (match.group(1) if match else "").lower()
+
+
+def validate_interface(interface):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@-]{0,14}", interface or ""):
+        fail("invalid interface name")
+    if not os.path.isdir(os.path.join(NET_BASE, interface)):
+        fail(f"interface does not exist: {interface}")
+    if interface == "lo":
+        fail("refusing loopback interface")
+    if interface.lower().startswith(VIRTUAL_PREFIXES):
+        fail(f"refusing virtual interface: {interface}")
+    kind = link_kind(interface)
+    if kind in VIRTUAL_KINDS:
+        fail(f"refusing virtual interface: {interface} ({kind})")
+
+    # Physical NICs expose a device symlink. Bridges/bonds/VLANs are virtual but
+    # common LAN exits, so they are allowed explicitly. Everything else is not.
+    if not os.path.exists(os.path.join(NET_BASE, interface, "device")) and kind not in TRUSTED_KINDS:
+        fail(f"interface is not a physical LAN device: {interface}")
+
+
+def normalize_address(text):
+    """Return (family, "network/prefix") for a private/local destination."""
+    text = str(text).strip()
+    if "/" in text:
+        try:
+            interface = ipaddress.ip_interface(text)
+        except ValueError:
+            fail(f"invalid address or prefix: {text}")
+        family = interface.version
+        network = interface.network
+    else:
+        try:
+            address = ipaddress.ip_address(text)
+        except ValueError:
+            fail(f"invalid address: {text}")
+        family = address.version
+        prefix = 32 if address.version == 4 else 128
+        network = ipaddress.ip_network(f"{address}/{prefix}", strict=False)
+
+    if family == 4:
+        first = network.network_address
+        last = network.broadcast_address
+        if not any(first in private and last in private for private in PRIVATE_V4_NETWORKS):
+            fail(f"destination must be on a private IPv4 network: {text}")
+    else:
+        first = network.network_address
+        last = network.broadcast_address
+        if not (
+            (first in ULA_V6_NETWORK and last in ULA_V6_NETWORK)
+            or (first.is_link_local and last.is_link_local)
+        ):
+            fail(f"destination must be ULA or link-local IPv6: {text}")
+
+    return family, str(network)
+
+
+def apply_route(item):
+    address = item.get("address")
+    interface = item.get("interface")
+    if not address or not interface:
+        fail("batch item requires address and interface")
+    validate_interface(str(interface))
+    family, destination = normalize_address(address)
+
+    command = ["-6" if family == 6 else "-4", "route", "replace", destination, "dev", str(interface)]
+    stdout, stderr, returncode = run_ip(*command)
+    if returncode != 0:
+        reason = (stderr or stdout).strip()
+        if reason:
+            reason = " ".join(reason.splitlines())
+        else:
+            reason = f"ip exited with code {returncode}"
+        fail(f"failed to replace route: {destination} dev {interface}: {reason}")
+    return family, destination, interface
+
+
+def apply_batch(items):
+    if not isinstance(items, list):
+        fail("JSON input must be an array")
+    applied = []
+    for item in items:
+        if not isinstance(item, dict):
+            fail("each JSON item must be an object")
+        applied.append(apply_route(item))
+    return applied
+
+
+def main():
+    args = sys.argv[1:]
+
+    if args and args[0] == "--batch-json":
+        if len(args) != 2:
+            fail("usage: lan-route-helper --batch-json <json-array>")
+        try:
+            items = json.loads(args[1])
+        except json.JSONDecodeError as exception:
+            fail(f"invalid JSON argument: {exception}")
+        print(json.dumps(apply_batch(items), ensure_ascii=False))
+        return 0
+
+    if args == ["--batch"]:
+        try:
+            items = json.load(sys.stdin)
+        except json.JSONDecodeError as exception:
+            fail(f"stdin is not valid JSON: {exception}")
+        print(json.dumps(apply_batch(items), ensure_ascii=False))
+        return 0
+
+    if len(args) == 2 and not args[0].startswith("-"):
+        family, destination, interface = apply_route(
+            {"address": args[0], "interface": args[1]}
+        )
+        print(f"{destination} dev {interface}")
+        return 0
+
+    fail("usage: lan-route-helper <address> <interface> | lan-route-helper --batch-json <json-array> | lan-route-helper --batch")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

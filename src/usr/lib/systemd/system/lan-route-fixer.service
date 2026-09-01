@@ -1,0 +1,12 @@
+[Unit]
+Description=Keep selected LAN devices on the physical network instead of a VPN
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/lan-route-fixer/lan-route-fixer-apply
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

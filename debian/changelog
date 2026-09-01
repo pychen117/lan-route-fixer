@@ -1,0 +1,45 @@
+lan-route-fixer (2.0.4-1) unstable; urgency=medium
+
+  * Update project identity and maintainer metadata.
+  * Use io.github.pychen117.LanRouteFixer as the application ID.
+  * Add LICENSE and repository hygiene files for GitHub publishing.
+
+ -- pychen117 <pychen117@163.com>  Mon, 01 Sep 2026 17:30:00 +0800
+
+lan-route-fixer (2.0.3-1) unstable; urgency=medium
+
+  * Fix GUI/manual repair reporting exit code 64 by passing helper batch JSON
+    as an argument instead of relying on pkexec stdin forwarding.
+  * Fix helper route command so it no longer invokes the ip binary twice.
+  * Include the ip error message when a privileged route replacement fails.
+
+ -- pychen117 <pychen117@163.com>  Mon, 01 Sep 2026 17:10:00 +0800
+
+lan-route-fixer (2.0.2-1) unstable; urgency=medium
+
+  * Respect auto_fix in the systemd and NetworkManager background appliers.
+  * Add CLI target management commands: list, add, remove, enable, disable,
+    set-interface.
+  * Reload polkit after installation so the helper policy is available
+    immediately.
+  * Harden helper interface-name validation.
+  * Declare Breaks/Replaces for the old deskflow-route-fixer package.
+
+ -- pychen117 <pychen117@163.com>  Mon, 01 Sep 2026 16:30:00 +0800
+
+lan-route-fixer (2.0.1-1) unstable; urgency=medium
+
+  * Add NetworkManager dispatcher to reapply routes after link/VPN changes.
+  * Add a root systemd service and timer for headless persistence.
+
+ -- pychen117 <pychen117@163.com>  Mon, 01 Sep 2026 12:00:00 +0800
+
+lan-route-fixer (2.0.0-1) unstable; urgency=medium
+
+  * Generalize the tool beyond Deskflow to any local LAN destination.
+  * Add CLI mode and GUI-independent core module.
+  * Batch privileged route changes into one helper invocation.
+  * Detect interfaces from link type and local subnet automatically.
+  * Accept private IPv4 CIDRs and ULA/link-local IPv6 destinations.
+
+ -- pychen117 <pychen117@163.com>  Mon, 01 Sep 2026 10:00:00 +0800

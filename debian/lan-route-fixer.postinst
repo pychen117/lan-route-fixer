@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+
+# Make polkit pick up the helper policy immediately after install/upgrade.
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl try-reload-or-restart polkit.service >/dev/null 2>&1 || true
+fi
+
+#DEBHELPER#

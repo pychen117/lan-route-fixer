@@ -1,0 +1,22 @@
+# Debian build artifacts
+/debian/files
+/debian/*.substvars
+/debian/*.debhelper.log
+/debian/debhelper-build-stamp
+/debian/.debhelper/
+/debian/lan-route-fixer/
+/debian/tmp/
+
+# Built packages
+*.deb
+*.buildinfo
+*.changes
+*.dsc
+*.tar.*
+*.upload
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/

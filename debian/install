@@ -1,0 +1,10 @@
+src/usr/bin/lan-route-fixer usr/bin
+src/usr/lib/lan-route-fixer/app.py usr/lib/lan-route-fixer
+src/usr/lib/lan-route-fixer/core.py usr/lib/lan-route-fixer
+src/usr/libexec/lan-route-fixer/lan-route-helper usr/libexec/lan-route-fixer
+src/usr/libexec/lan-route-fixer/lan-route-fixer-apply usr/libexec/lan-route-fixer
+src/usr/lib/systemd/system/lan-route-fixer.service usr/lib/systemd/system
+src/usr/lib/systemd/system/lan-route-fixer.timer usr/lib/systemd/system
+src/usr/share/polkit-1/actions/usr.libexec.lan-route-fixer.lan-route-helper.policy usr/share/polkit-1/actions
+src/usr/share/applications/lan-route-fixer.desktop usr/share/applications
+src/etc/NetworkManager/dispatcher.d/90-lan-route-fixer etc/NetworkManager/dispatcher.d

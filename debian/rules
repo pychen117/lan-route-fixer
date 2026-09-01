@@ -1,0 +1,11 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_fixperms:
+	dh_fixperms
+	chmod 0755 debian/lan-route-fixer/usr/bin/lan-route-fixer
+	chmod 0755 debian/lan-route-fixer/usr/libexec/lan-route-fixer/lan-route-helper
+	chmod 0755 debian/lan-route-fixer/usr/libexec/lan-route-fixer/lan-route-fixer-apply
+	chmod 0755 debian/lan-route-fixer/etc/NetworkManager/dispatcher.d/90-lan-route-fixer

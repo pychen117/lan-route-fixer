@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=局域网路由修复
+Comment=自动保持所选局域网设备绕过 VPN 隧道直连
+Exec=/usr/bin/lan-route-fixer
+Icon=network-wired
+Terminal=false
+Categories=Network;
+StartupWMClass=io.github.pychen117.LanRouteFixer
+DBusActivatable=false
+StartupNotify=true
+Keywords=VPN;LAN;route;split-tunnel;deskflow;NAS;printer;

@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodically repair lan-route-fixer routes
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
