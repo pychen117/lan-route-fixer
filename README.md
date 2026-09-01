@@ -44,7 +44,7 @@ ip route replace 192.168.4.169/32 dev wlp0s20f3
 ```sh
 cd lan-route-fixer
 dpkg-buildpackage -us -uc -b
-sudo apt install ../lan-route-fixer_2.0.3-1_all.deb
+sudo apt install ../lan-route-fixer_2.0.4-1_all.deb
 ```
 
 安装后：
