@@ -1,0 +1,40 @@
+[Unit]
+Description=Keep selected LAN devices on the physical network instead of a VPN (event driven)
+Documentation=https://github.com/pychen117/lan-route-fixer
+# The daemon subscribes to rtnetlink, so it should be running before a VPN
+# client starts rewriting the routing table at connect time.
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/bin/lan-route-fixer daemon --quiet --interval 15 --dbus
+Restart=always
+RestartSec=2
+# Route and rule changes need CAP_NET_ADMIN; CAP_NET_RAW is kept for the
+# optional diagnostic probes. Everything else is dropped.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=yes
+# The daemon must read every user's ~/.config, so /home stays readable but is
+# never written to: publishing state happens in /run (RuntimeDirectory).
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/run/lan-route-fixer /var/lib/lan-route-fixer
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_NETLINK AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RuntimeDirectory=lan-route-fixer
+RuntimeDirectoryMode=0755
+StateDirectory=lan-route-fixer
+Environment=PYTHONUNBUFFERED=1
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target

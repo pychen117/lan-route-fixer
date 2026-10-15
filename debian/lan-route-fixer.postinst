@@ -2,6 +2,10 @@
 set -e
 
 # Make polkit pick up the helper policy immediately after install/upgrade.
+#
+# Enabling and starting the units is left to dh_installsystemd, which is driven
+# by the [Install] sections of the unit files. It is deliberately not forced
+# here: a user who disabled lan-route-fixer-daemon.service must stay in control.
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
     systemctl try-reload-or-restart polkit.service >/dev/null 2>&1 || true
 fi

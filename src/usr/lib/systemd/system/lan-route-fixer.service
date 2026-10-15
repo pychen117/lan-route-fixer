@@ -1,11 +1,18 @@
 [Unit]
-Description=Keep selected LAN devices on the physical network instead of a VPN
+Description=Keep selected LAN devices on the physical network instead of a VPN (one shot repair)
+Documentation=https://github.com/pychen117/lan-route-fixer
+# Triggered by NetworkManager (via the dispatcher) and by lan-route-fixer.timer.
+# It is the fallback for systems that cannot run the event driven daemon.
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 ExecStart=/usr/libexec/lan-route-fixer/lan-route-fixer-apply
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+ProtectSystem=full
+ProtectHome=read-only
 Nice=5
 
 [Install]

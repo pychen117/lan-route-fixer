@@ -1,0 +1,230 @@
+#!/bin/bash
+# Real-kernel verification inside a private user+network namespace.
+#
+# Run as an ordinary user:  bash tools/verify-namespace
+#
+# Why this exists: the central claims of 2.1.0 are about what the *kernel* does
+# - that an `ip rule` really pre-empts the main table, that
+# `ip route replace ... table N proto 66` really works, that a hijacked route is
+# really repaired. Unit tests with a fake backend cannot prove any of that, and
+# `tools/verify-install` needs your password.
+#
+# `unshare -Urn` gives an unprivileged user a private network namespace where
+# they are root, so the real `ip` binary and the real kernel routing code are
+# exercised without touching the host's routing table.
+#
+# Topology (a second namespace is unavailable: `ip netns` needs setns(), which a
+# user namespace does not permit):
+#
+#   lan0  bridge 192.168.4.238/24       the "physical" LAN NIC
+#     +-- lan0uplink ==veth== lan0peer    the cable; the far end has no address
+#   vpn0  dummy  10.85.35.9/24          the "VPN" uplink, owns the default route
+#
+# Two details matter:
+#   * lan0 is a *bridge*, not a veth or a dummy: lanrf deliberately refuses
+#     veth/tun/dummy as LAN exits and trusts bridge/bond/vlan. Using a veth here
+#     would test the classifier rather than the routing.
+#   * the host under test, 192.168.4.19, is bound to no local interface: a local
+#     address would be answered from the `local` table and a policy rule would
+#     never be consulted.
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+PYTHON=${PYTHON:-python3}
+TABLE=168
+PREF=1200
+
+if ! unshare -Urn true 2>/dev/null; then
+    echo "This kernel does not allow unprivileged network namespaces." >&2
+    echo "Use 'sudo bash tools/verify-install' instead." >&2
+    exit 2
+fi
+
+unshare -Urn bash -s "$REPO_ROOT" "$PYTHON" "$TABLE" "$PREF" <<'INNER'
+set -u
+REPO_ROOT="$1"; PYTHON="$2"; TABLE="$3"; PREF="$4"
+LIB_DIR="$REPO_ROOT/src/usr/lib/lan-route-fixer"
+BIN="$REPO_ROOT/src/usr/bin/lan-route-fixer"
+WORKDIR=$(mktemp -d)
+CONFIG="$WORKDIR/config.json"
+TARGET=192.168.4.19
+OTHER=192.168.4.99
+PASS=0
+FAIL=0
+
+check() {
+    local label="$1"; shift
+    if "$@" >/dev/null 2>&1; then
+        printf '  \033[32m✓\033[0m %s\n' "$label"; PASS=$((PASS + 1))
+    else
+        printf '  \033[31m✗\033[0m %s\n' "$label"; FAIL=$((FAIL + 1))
+    fi
+}
+
+ip link add lan0 type bridge
+ip link add lan0uplink type veth peer name lan0peer
+ip link set lan0uplink master lan0
+ip link add vpn0 type dummy
+ip link set lan0 up; ip link set lan0uplink up; ip link set lan0peer up; ip link set vpn0 up
+ip addr add 192.168.4.238/24 dev lan0
+ip addr add 10.85.35.9/24 dev vpn0
+ip route add default via 10.85.35.1 dev vpn0
+
+export LAN_ROUTE_FIXER_LIB="$LIB_DIR"
+export LAN_ROUTE_FIXER_STATE="$WORKDIR/state.json"
+
+echo "== 0. topology, as the tool sees it =="
+echo "  $(ip -o addr show | awk '$2!="lo"{printf "%s=%s ", $2, $4}')"
+check "backend classifies lan0 (bridge) as a usable LAN exit" \
+    "$PYTHON" -c "
+import sys; sys.path.insert(0, '$LIB_DIR')
+from lanrf.backends import get_backend
+b = get_backend()
+assert b.is_usable('lan0'), 'lan0 rejected: kind=%r' % b.link_kind('lan0')
+assert not b.is_usable('vpn0'), 'vpn0 (dummy) must be rejected'
+assert 'vpn0' not in b.default_interfaces(), b.default_interfaces()
+assert b.list_interfaces(only_up=True) == ['lan0'], b.list_interfaces(only_up=True)
+"
+echo "  host under test: $TARGET (bound to no local interface)"
+echo
+
+echo "== 1. the VPN claims the whole LAN subnet (what aTrust does) =="
+ip route replace 192.168.4.0/24 dev vpn0
+echo "  main table: $(ip route show exact 192.168.4.0/24 | head -1)"
+check "without protection the host goes into the tunnel" \
+    sh -c "ip route get $TARGET | grep -q 'dev vpn0'"
+echo
+
+echo "== 2. real ip rule + real route in a dedicated table =="
+check "ip rule add pref $PREF to $TARGET/32 lookup $TABLE" \
+    ip rule add pref "$PREF" to "$TARGET/32" lookup "$TABLE"
+check "ip route replace $TARGET/32 dev lan0 table $TABLE proto 66" \
+    ip route replace "$TARGET/32" dev lan0 src 192.168.4.238 table "$TABLE" proto 66
+ip rule show | grep -E "lookup $TABLE|lookup main" | sed 's/^/  /'
+echo "  table $TABLE: $(ip route show table "$TABLE")"
+echo
+
+echo "== 3. the policy rule really pre-empts the main table =="
+check "kernel now picks lan0 for the pinned host" \
+    sh -c "ip route get $TARGET | grep -q 'dev lan0'"
+check "the rest of the subnet still goes to the tunnel" \
+    sh -c "ip route get $OTHER | grep -q 'dev vpn0'"
+check "the rule survives the VPN rewriting main again" \
+    sh -c "ip route replace 192.168.4.0/24 dev vpn0 && ip route get $TARGET | grep -q 'dev lan0'"
+echo
+
+echo "== 4. the daemon repairs a route hijacked inside main =="
+# The real failure mode: aTrust displaces the host route in the main table and
+# traffic falls into the tunnel.
+ip route del "$TARGET/32" 2>/dev/null
+ip route replace "$TARGET/32" dev vpn0
+rm -f "$WORKDIR/state.json"
+cat > "$CONFIG" <<JSON
+{"targets":[{"name":"u55c","address":"$TARGET","interface":"lan0","enabled":true}],
+ "routing_mode":"rule","rule_table":$TABLE,"rule_preference":$PREF}
+JSON
+check "the hijack is visible before the repair" \
+    sh -c "ip route show exact $TARGET/32 | grep -q 'dev vpn0'"
+"$PYTHON" "$BIN" --config "$CONFIG" daemon --once --quiet
+check "daemon installed the route in the dedicated table" \
+    sh -c "ip route show table $TABLE exact $TARGET/32 | grep -q 'dev lan0'"
+check "route keeps the proto 66 stamp" \
+    sh -c "ip route show table $TABLE exact $TARGET/32 | grep -q 'proto 66'"
+check "route keeps the pinned source address" \
+    sh -c "ip route show table $TABLE exact $TARGET/32 | grep -q 'src 192.168.4.238'"
+check "kernel reaches the host through lan0 despite the main-table hijack" \
+    sh -c "ip route get $TARGET | grep -q 'dev lan0'"
+check "second pass reports nothing changed" \
+    sh -c "'$PYTHON' '$BIN' --config '$CONFIG' daemon --once --interval 2 | grep -q 'changed=0'"
+check "state file published for unprivileged readers" \
+    "$PYTHON" -c "
+import json
+d = json.load(open('$WORKDIR/state.json'))
+assert d['ok'] is True, d
+assert d['routing_mode'] == 'rule', d
+assert d['snapshots'][0]['state'] == 'ok', d['snapshots'][0]
+"
+echo
+
+echo "== 5. hijack/repair latency, measured on the live event loop =="
+# The whole point of 2.1.0: the daemon must react to a kernel route event, not
+# wait for a timer. The poll interval below is deliberately huge, so any repair
+# observed here can only have come from rtnetlink.
+LATENCY_CONFIG="$WORKDIR/latency.json"
+cat > "$LATENCY_CONFIG" <<JSON
+{"targets":[{"name":"u55c","address":"$TARGET","interface":"lan0","enabled":true}],
+ "routing_mode":"rule","rule_table":$TABLE,"rule_preference":$PREF}
+JSON
+"$PYTHON" "$BIN" --config "$LATENCY_CONFIG" daemon --interval 300 --quiet &
+DAEMON_PID=$!
+sleep 2
+
+measure_repair() {
+    local label="$1"
+    local start end deadline
+    start=$(date +%s.%N)
+    ip route replace "$TARGET/32" dev vpn0 table "$TABLE"
+    deadline=$(( $(date +%s) + 20 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        if ip route show table "$TABLE" exact "$TARGET/32" | grep -q 'dev lan0'; then
+            end=$(date +%s.%N)
+            printf '  %-22s repaired in %.2f s\n' "$label" "$(echo "$end - $start" | bc)"
+            return 0
+        fi
+    done
+    printf '  \033[31m✗\033[0m %-20s NOT repaired within 20s\n' "$label"
+    return 1
+}
+
+LATENCY_OK=1
+for attempt in 1 2 3; do
+    measure_repair "hijack #$attempt" || LATENCY_OK=0
+done
+check "every hijack was repaired by a kernel event (poll interval was 300s)" \
+    test "$LATENCY_OK" = "1"
+
+kill "$DAEMON_PID" 2>/dev/null
+wait "$DAEMON_PID" 2>/dev/null
+ip route replace "$TARGET/32" dev vpn0 table "$TABLE"
+sleep 2
+check "with the daemon stopped the hijack stays in place (nothing else repairs it)" \
+    sh -c "ip route show table $TABLE exact $TARGET/32 | grep -q 'dev vpn0'"
+echo
+
+echo "== 6. removing the target cleans everything up =="
+# The hijack from the latency section sits in our table with a foreign proto;
+# drop it so this section genuinely tests our own route being withdrawn.
+ip route del "$TARGET/32" table "$TABLE" 2>/dev/null
+cat > "$CONFIG" <<JSON
+{"targets":[],"routing_mode":"rule","rule_table":$TABLE,"rule_preference":$PREF}
+JSON
+"$PYTHON" "$BIN" --config "$CONFIG" daemon --once --quiet
+check "policy rule garbage collected" \
+    sh -c "! ip rule show | grep -q \"to $TARGET/32 lookup $TABLE\""
+check "our route is gone from the dedicated table" \
+    sh -c "! ip route show table $TABLE | grep -q '$TARGET'"
+echo
+
+echo "== 7. main mode behaves like 2.0.x (no policy rule) =="
+ip route del "$TARGET/32" 2>/dev/null
+cat > "$CONFIG" <<JSON
+{"targets":[{"name":"u55c","address":"$TARGET","interface":"lan0","enabled":true}],
+ "routing_mode":"main","rule_table":$TABLE,"rule_preference":$PREF}
+JSON
+"$PYTHON" "$BIN" --config "$CONFIG" daemon --once --quiet
+check "no policy rule was installed in main mode" \
+    sh -c "! ip rule show | grep -q \"to $TARGET/32 lookup $TABLE\""
+check "the host route was installed in the main table instead" \
+    sh -c "ip route show table main exact $TARGET/32 | grep -q 'dev lan0'"
+check "the kernel reaches the host through lan0" \
+    sh -c "ip route get $TARGET | grep -q 'dev lan0'"
+echo
+
+rm -rf "$WORKDIR"
+echo "== result =="
+echo "  passed: $PASS"
+echo "  failed: $FAIL"
+[ "$FAIL" -eq 0 ] || exit 1
+echo "  all checks passed"
+INNER

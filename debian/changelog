@@ -1,3 +1,50 @@
+lan-route-fixer (2.1.0-1) unstable; urgency=medium
+
+  * Event driven repair: new lan-route-fixer-daemon.service subscribes to
+    rtnetlink route/link notifications and repairs displaced LAN routes in about
+    0.33s (measured on a real kernel by tools/verify-namespace) instead of
+    waiting up to 30 seconds for the timer. This is the difference between
+    "SSH dies when the VPN connects" and "nothing happens".
+  * Policy routing: routes can live in a dedicated table selected by a
+    high-priority `ip rule` (routing_mode=rule, the new default, table 168).
+    A VPN client that rewrites the main table can no longer capture targets.
+  * No more repeated authorization prompts: the daemon exposes a D-Bus control
+    interface (io.github.pychen117.LanRouteFixer) and `fix`/the GUI ask it to
+    reconcile instead of calling pkexec. Targets still come from the config
+    files, never from the caller, so no privilege is delegated; pkexec remains
+    as the fallback for targets no config file mentions. Access is gated by a
+    system bus policy plus a sender-UID check in the daemon.
+  * Preferred source address and a dedicated route protocol stamp (proto 66)
+    make the installed routes attributable and garbage collectable.
+  * New `doctor` command names the route that is capturing a target, and
+    `status` reports what the daemon last saw; both work without root.
+    `status` now labels disabled targets instead of showing them as healthy.
+  * New `daemon` command with --once/--dry-run/--dbus, `fix --direct`, and
+    `config get/set`; per-target `--expand` covers a whole local subnet.
+  * Platform backend abstraction (lanrf.backends): all Linux specifics now live
+    in lanrf/linux.py behind a NetworkBackend protocol, with a documented
+    Windows skeleton (lanrf/windows.py) mapping the IP Helper API, named pipes
+    and the service model.
+  * GUI shows the daemon state and routing mode, and reports when a repair was
+    handled by the daemon without a password prompt.
+  * Interface classification now ignores administratively-up-but-down devices
+    such as an unused docker0 bridge.
+  * Fix rule detection: `ip rule show` prints a host rule without the /32 it
+    was added with, so comparing the raw strings made the tool believe its own
+    rule was missing - reinstalling it on every pass and reporting the target as
+    broken forever.
+  * Fix `--config PATH <command>` silently opening the GUI: the option *value*
+    was being tested as if it were a command name. Dispatch now lives in
+    lanrf/dispatch.py with its own tests.
+  * New tools/verify-namespace proves the routing behaviour against a real
+    kernel inside an unprivileged network namespace (21 checks, no root).
+  * Broadened test suite (155 tests) covering the reconciliation engine,
+    rtnetlink decoding, D-Bus interface and access checks, config
+    compatibility and the helper's trust boundary.
+  * Systemd units are sandboxed (capability bounding sets, ProtectSystem).
+
+ -- pychen117 <pychen117@163.com>  Thu, 15 Oct 2026 23:59:00 +0800
+
 lan-route-fixer (2.0.4-1) unstable; urgency=medium
 
   * Update project identity and maintainer metadata.

@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=io.github.pychen117.LanRouteFixer
+Exec=/usr/bin/lan-route-fixer daemon --quiet --interval 15 --dbus
+SystemdService=lan-route-fixer-daemon.service

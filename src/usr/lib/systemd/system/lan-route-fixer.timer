@@ -1,9 +1,13 @@
 [Unit]
-Description=Periodically repair lan-route-fixer routes
+Description=Periodically repair lan-route-fixer routes (fallback for the event driven daemon)
 
 [Timer]
-OnBootSec=30s
-OnUnitActiveSec=30s
+# Only a safety net: lan-route-fixer-daemon.service reacts to kernel route
+# notifications within milliseconds. This timer still covers systems where the
+# daemon is disabled or rtnetlink notifications are unavailable.
+OnBootSec=20s
+OnUnitActiveSec=60s
+AccuracySec=5s
 Persistent=true
 
 [Install]

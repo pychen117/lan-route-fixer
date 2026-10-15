@@ -1,39 +1,45 @@
 #!/usr/bin/env python3
-"""Root-level route applier used by NetworkManager dispatcher and systemd.
+"""Root-level route applier used by the NetworkManager dispatcher and systemd.
 
 This script must run as root. It reads every discovered lan-route-fixer config,
-checks the current routes, and repairs only the ones that are wrong.
+checks the current routes, and repairs only the ones that are wrong. It is the
+one-shot counterpart of ``lan-route-fixer daemon``; the daemon is preferred
+because it reacts to kernel route notifications instead of waiting for a timer.
 """
 
+import os
 import sys
 from pathlib import Path
 
-import os
 LIB_DIR = Path(os.environ.get("LAN_ROUTE_FIXER_LIB", "/usr/lib/lan-route-fixer"))
 if str(LIB_DIR) not in sys.path:
     sys.path.insert(0, str(LIB_DIR))
 
-import core
+from lanrf.system import apply_all_configs  # noqa: E402
 
 
 def main():
     try:
-        outcome = core.apply_all_configs()
-    except Exception as exception:
+        outcome = apply_all_configs()
+    except Exception as exception:  # noqa: BLE001 - reported to the journal
         print(f"lan-route-fixer-apply: {exception}", file=sys.stderr)
         return 1
 
-    if outcome.get("return_code") == 0:
-        print(
-            "lan-route-fixer-apply: "
-            f"checked={outcome.get('checked', 0)} fixed={outcome.get('fixed', 0)} failed=0"
-        )
+    summary = (
+        f"checked={outcome.get('checked', 0)} "
+        f"changed={outcome.get('changed', 0)} "
+        f"bad={outcome.get('bad', 0)} "
+        f"failed={outcome.get('failed', 0)}"
+    )
+    for detail in outcome.get("details", [])[:20]:
+        print(f"lan-route-fixer-apply: applied {detail}")
+
+    if outcome.get("return_code") == 0 and outcome.get("failed", 0) == 0:
+        print(f"lan-route-fixer-apply: {summary}")
         return 0
 
     print(
-        "lan-route-fixer-apply: "
-        f"checked={outcome.get('checked', 0)} fixed={outcome.get('fixed', 0)} "
-        f"failed={outcome.get('failed', 0)} error={outcome.get('stderr', '')}",
+        f"lan-route-fixer-apply: {summary} error={outcome.get('stderr', '')}",
         file=sys.stderr,
     )
     return 1

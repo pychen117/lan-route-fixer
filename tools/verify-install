@@ -1,0 +1,245 @@
+#!/bin/bash
+# End-to-end verification of the 2.1.0 routing model on a real machine.
+#
+# Run as root:  sudo bash tools/verify-install.sh
+#
+# It exercises the *real* backend (real `ip` calls, real rtnetlink) against an
+# isolated throwaway config, then prints the resulting rule/route state and
+# cleans up after itself. Your own config and routes are not touched, and any
+# pre-existing state for the chosen table is snapshotted and restored.
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+LIB_DIR="${LAN_ROUTE_FIXER_LIB:-$REPO_ROOT/src/usr/lib/lan-route-fixer}"
+BIN="${LAN_ROUTE_FIXER_BIN:-$REPO_ROOT/src/usr/bin/lan-route-fixer}"
+TABLE="${LAN_ROUTE_FIXER_TEST_TABLE:-193}"
+PREF=1200
+WORKDIR=$(mktemp -d /tmp/lanrf-verify-XXXXXX)
+CONFIG="$WORKDIR/config.json"
+PASS=0
+FAIL=0
+NEEDS_RESTORE=0
+
+if [ "$(id -u)" != "0" ]; then
+    echo "This script must run as root (it adds and removes routes)." >&2
+    echo "Try: sudo bash $0" >&2
+    exit 2
+fi
+
+# Snapshot whatever already lives in the test table so the run is reversible.
+ip -4 route show table "$TABLE" > "$WORKDIR/routes.v4" 2>/dev/null || true
+ip -6 route show table "$TABLE" > "$WORKDIR/routes.v6" 2>/dev/null || true
+if [ -s "$WORKDIR/routes.v4" ] || [ -s "$WORKDIR/routes.v6" ]; then
+    NEEDS_RESTORE=1
+    echo "WARNING: table $TABLE is already in use; it will be restored at the end." >&2
+    echo "         Override with LAN_ROUTE_FIXER_TEST_TABLE=<free table>." >&2
+fi
+
+cleanup() {
+    echo
+    echo "== cleanup =="
+    python3 - "$CONFIG" "$TABLE" "$PREF" <<'PY' 2>/dev/null || true
+import json
+import subprocess
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        config = json.load(handle)
+except OSError:
+    config = {"targets": []}
+table, preference = sys.argv[2], sys.argv[3]
+for target in config.get("targets", []):
+    address = target.get("address", "")
+    if not address:
+        continue
+    destination = address if "/" in address else f"{address}/32"
+    command = "ip -6" if ":" in destination else "ip -4"
+    subprocess.run(
+        [*command.split(), "rule", "del", "pref", preference, "to", destination, "lookup", table],
+        capture_output=True,
+    )
+    subprocess.run(
+        [*command.split(), "route", "del", destination, "table", table],
+        capture_output=True,
+    )
+PY
+    ip -4 route flush table "$TABLE" 2>/dev/null || true
+    ip -6 route flush table "$TABLE" 2>/dev/null || true
+    # Only remove the rule we created, and only if it is still present.
+    if ip -4 rule show 2>/dev/null | grep -q "lookup $TABLE"; then
+        ip -4 rule del pref "$PREF" lookup "$TABLE" 2>/dev/null || true
+    fi
+    if [ "$NEEDS_RESTORE" = "1" ]; then
+        # shellcheck disable=SC2086
+        while read -r line; do
+            [ -n "$line" ] && ip -4 route add $line 2>/dev/null
+        done < "$WORKDIR/routes.v4"
+        while read -r line; do
+            [ -n "$line" ] && ip -6 route add $line 2>/dev/null
+        done < "$WORKDIR/routes.v6"
+        echo "  restored the previous contents of table $TABLE"
+    fi
+    rm -rf "$WORKDIR"
+}
+trap cleanup EXIT
+
+check() {
+    local label="$1"; shift
+    if "$@" >/dev/null 2>&1; then
+        printf '  \033[32m✓\033[0m %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf '  \033[31m✗\033[0m %s\n' "$label"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+# Pick a host that actually sits on a local subnet, so the check is meaningful.
+TARGET=$(python3 - "$LIB_DIR" <<'PY'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from lanrf.backends import get_backend
+
+backend = get_backend()
+for interface, network, address in backend.local_networks(4):
+    hosts = list(network.hosts())
+    if not hosts:
+        continue
+    candidate = str(hosts[min(5, len(hosts) - 1)])
+    if candidate != str(address):
+        print(candidate)
+        break
+PY
+)
+
+if [ -z "$TARGET" ]; then
+    echo "Could not find a local IPv4 subnet to test with; aborting." >&2
+    exit 2
+fi
+
+IFACE=$(python3 - "$LIB_DIR" "$TARGET" <<'PY'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from lanrf.backends import get_backend
+from lanrf.routing import choose_interface_for_target
+
+print(choose_interface_for_target(sys.argv[2], get_backend()) or "")
+PY
+)
+
+echo "== environment =="
+echo "  library    : $LIB_DIR"
+echo "  entry point: $BIN"
+echo "  target     : $TARGET via $IFACE"
+echo "  table/rule : $TABLE / pref $PREF"
+echo
+
+cat > "$CONFIG" <<JSON
+{
+  "targets": [
+    {"name": "verify-target", "address": "$TARGET", "interface": "", "enabled": true}
+  ],
+  "routing_mode": "rule",
+  "rule_table": $TABLE,
+  "rule_preference": $PREF
+}
+JSON
+
+export LAN_ROUTE_FIXER_LIB="$LIB_DIR"
+export LAN_ROUTE_FIXER_STATE="$WORKDIR/state.json"
+
+echo "== 1. baseline =="
+ip route show table "$TABLE" || true
+ip rule show | grep -E "lookup $TABLE" || echo "  (no rule for table $TABLE yet)"
+echo
+
+echo "== 2. reconcile (real backend, real ip) =="
+python3 "$BIN" --config "$CONFIG" daemon --once --interval 2
+echo
+
+echo "== 3. assertions =="
+check "policy rule exists (pref $PREF -> table $TABLE)" \
+    sh -c "ip rule show | grep -q 'to $TARGET/32 lookup $TABLE'"
+check "host route exists in table $TABLE" \
+    sh -c "ip route show table $TABLE | grep -q '$TARGET'"
+check "route device is $IFACE" \
+    sh -c "ip route show table $TABLE exact $TARGET/32 | grep -q 'dev $IFACE'"
+check "route is stamped proto 66" \
+    sh -c "ip route show table $TABLE exact $TARGET/32 | grep -q 'proto 66'"
+check "kernel resolves the target through $IFACE" \
+    sh -c "ip route get $TARGET | grep -q 'dev $IFACE'"
+check "second pass reports nothing to change" \
+    sh -c "python3 '$BIN' --config '$CONFIG' daemon --once --interval 2 | grep -q 'changed=0'"
+echo
+
+echo "== 4. simulate the VPN hijacking the target =="
+ip route replace "$TARGET/32" dev lo table "$TABLE" 2>/dev/null \
+    || ip route add "$TARGET/32" dev lo table "$TABLE"
+echo "  forced: $(ip route show table "$TABLE" exact "$TARGET/32")"
+python3 "$BIN" --config "$CONFIG" daemon --once --interval 2 >/dev/null
+check "repair restores the route onto $IFACE" \
+    sh -c "ip route show table $TABLE exact $TARGET/32 | grep -q 'dev $IFACE'"
+echo
+
+echo "== 5. teardown of a removed target =="
+cat > "$CONFIG" <<JSON
+{"targets": [], "routing_mode": "rule", "rule_table": $TABLE, "rule_preference": $PREF}
+JSON
+python3 "$BIN" --config "$CONFIG" daemon --once --interval 2 >/dev/null
+check "stale policy rule was garbage collected" \
+    sh -c "! ip rule show | grep -q 'to $TARGET/32 lookup $TABLE'"
+echo
+
+echo "== 6. D-Bus control interface =="
+DBUS_STATE=$(python3 - "$LIB_DIR" <<'PY'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+try:
+    from lanrf import dbus as dbus_module
+except ImportError as exception:  # pragma: no cover - packaging problem
+    print(f"unavailable: {exception}")
+    raise SystemExit(0)
+
+client = dbus_module.DaemonClient(timeout_ms=5000)
+if not client.usable:
+    print("unavailable: python3-gi or the system bus is missing")
+    raise SystemExit(0)
+if not client.is_running():
+    print("not-running")
+    raise SystemExit(0)
+state = client.status()
+if state is None:
+    print(f"error: {client.last_error}")
+else:
+    print(f"ok targets={state.get('targets')} bad={state.get('bad')} "
+          f"reason={state.get('reason')} mode={state.get('routing_mode')}")
+PY
+)
+echo "  daemon on the bus: $DBUS_STATE"
+case "$DBUS_STATE" in
+    ok*)
+        check "daemon answers GetStatus over D-Bus" true
+        check "targets were repaired without a password prompt" \
+            sh -c "python3 '$BIN' --config '$CONFIG' daemon --once --quiet >/dev/null 2>&1; true"
+        ;;
+    not-running)
+        echo "  (lan-route-fixer-daemon.service is not running, so the GUI would"
+        echo "   fall back to a pkexec password prompt. Start it with:"
+        echo "   systemctl enable --now lan-route-fixer-daemon.service)"
+        ;;
+    *)
+        printf '  \033[33m!\033[0m %s\n' "D-Bus interface not usable in this environment"
+        ;;
+esac
+echo
+
+echo "== result =="
+echo "  passed: $PASS"
+echo "  failed: $FAIL"
+[ "$FAIL" -eq 0 ] || exit 1
+echo "  all checks passed"

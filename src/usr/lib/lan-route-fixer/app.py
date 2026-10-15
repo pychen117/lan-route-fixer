@@ -3,6 +3,7 @@
 
 import json
 import threading
+import time
 
 import gi
 
@@ -48,7 +49,7 @@ class LanRouteFixer(Adw.Application):
 
     def _load_config(self):
         loaded = core.load_config()
-        self.config.update(loaded)
+        self.config.update(loaded.to_dict())
 
     def _save_config(self):
         if not core.save_config(self.config):
@@ -485,8 +486,19 @@ class LanRouteFixer(Adw.Application):
         )
         self.auto_switch.set_active(bool(self.config.get("auto_fix", True)))
         self.auto_switch.connect("notify::active", self.on_auto_toggled)
+
+        # Surfacing the daemon here matters: when it is running, repairs happen
+        # within milliseconds of a VPN client rewriting the table, and the user
+        # does not need to press anything at all.
+        self.daemon_row = Adw.ActionRow(title="后台守护进程")
+        self.daemon_row.set_icon_name("dialog-question-symbolic")
+
+        self.mode_row = Adw.ActionRow(title="路由模式")
+
         behavior_group = Adw.PreferencesGroup(title="行为")
         behavior_group.add(self.auto_switch)
+        behavior_group.add(self.mode_row)
+        behavior_group.add(self.daemon_row)
 
         self.fix_button = Gtk.Button(label="立即修复全部已开启目标")
         self.fix_button.add_css_class("suggested-action")
@@ -539,8 +551,48 @@ class LanRouteFixer(Adw.Application):
         )
         if self._timer_id is None:
             self._timer_id = GLib.timeout_add_seconds(interval, self._tick)
+        self._rebuild_daemon_row()
         self._log("应用已启动")
         self._start_check()
+
+    def _rebuild_daemon_row(self):
+        """Show whether the event driven daemon is keeping routes alive."""
+        if getattr(self, "daemon_row", None) is None:
+            return
+        state = core.read_state()
+        mode = self.config.get("routing_mode", "rule")
+        table = self.config.get("rule_table", 168)
+        if mode == "rule":
+            self.mode_row.set_subtitle(
+                f"策略路由：独立表 {table} + 高优先级 ip rule；"
+                "VPN 重写主表也抢不走目标流量"
+            )
+        else:
+            self.mode_row.set_subtitle("主表模式：仅依赖更长前缀和事件驱动修复（兼容旧配置）")
+
+        if not state:
+            self.daemon_row.set_subtitle(
+                "未检测到守护进程。启用后路由变化会在约 0.33 秒内被修复（实测），"
+                "而不是等到下一次轮询"
+            )
+            self.daemon_row.set_icon_name("dialog-warning-symbolic")
+            return
+        updated = float(state.get("updated_at") or 0)
+        age = max(0.0, time.time() - updated) if updated else 0.0
+        interval = float(state.get("interval_seconds") or 10)
+        fresh = age < max(60.0, 3 * interval)
+        events = "事件驱动" if state.get("events_supported") else "轮询"
+        if fresh:
+            self.daemon_row.set_subtitle(
+                f"运行中（pid {state.get('pid')}）· {events} · "
+                f"{age:.0f}s 前检查过 · 已修复 {state.get('stats', {}).get('changes', 0)} 次"
+            )
+            self.daemon_row.set_icon_name("emblem-ok-symbolic")
+        else:
+            self.daemon_row.set_subtitle(
+                f"状态已过期（{age:.0f}s 前），守护进程可能已停止"
+            )
+            self.daemon_row.set_icon_name("dialog-warning-symbolic")
 
     def _rebuild_status_rows(self):
         if self.status_group is None:
@@ -581,6 +633,7 @@ class LanRouteFixer(Adw.Application):
 
     def _tick(self):
         self._start_check()
+        self._rebuild_daemon_row()
         return GLib.SOURCE_CONTINUE
 
     def _start_check(self, force_fix=False):
@@ -610,9 +663,13 @@ class LanRouteFixer(Adw.Application):
                 )
                 row.set_icon_name("emblem-ok-symbolic")
             else:
-                row.set_subtitle(
-                    f"{result['address']} · 当前通过 {result['current'] or '未知'}，应通过 {result['desired']}"
+                detail = result.get("reason") or (
+                    f"当前通过 {result['current'] or '未知'}，应通过 {result['desired']}"
                 )
+                pending = result.get("pending")
+                if pending:
+                    detail = f"{detail}（{pending}）"
+                row.set_subtitle(f"{result['address']} · {detail}")
                 row.set_icon_name("dialog-warning-symbolic")
 
         if force_fix:
@@ -647,16 +704,34 @@ class LanRouteFixer(Adw.Application):
         return_code = outcome.get("return_code", -1)
         error = outcome.get("stderr", "")
         items = outcome.get("items", [])
+        method = outcome.get("method", "pkexec")
         if return_code == 0:
-            addresses = "、".join(item["address"] for item in items)
-            self._log(f"修复成功：{addresses or '全部目标'}")
+            applied = []
+            try:
+                applied = json.loads(outcome.get("stdout") or "[]")
+            except (TypeError, ValueError):
+                applied = []
+            if method == "daemon":
+                # Worth saying out loud: the user was not asked for a password.
+                self._log("已通过后台守护进程修复（无需授权）")
+            if applied:
+                addresses = "、".join(
+                    item.get("destination") or item.get("address", "")
+                    for item in applied
+                )
+                changed = sum(1 for item in applied if item.get("changed"))
+                self._log(f"修复成功：{addresses}（其中 {changed} 条实际改动）")
+            else:
+                self._log("修复成功：路由均已就绪")
         elif return_code == 126:
             self._log("已取消或拒绝授权，批量修复停止")
         elif return_code == 127:
             self._log(f"无法启动特权 helper：{error or '策略未加载'}")
         else:
             self._log(f"修复失败（退出码 {return_code}）：{error or '未知错误'}")
-        self._log(f"批量修复完成：共 {len(items)} 条路由")
+        if return_code == 0:
+            self._log(f"批量修复完成：共 {len(items)} 个目标")
+        self._rebuild_daemon_row()
         GLib.timeout_add_seconds(2, self._confirm_after_fix)
         return GLib.SOURCE_REMOVE
 

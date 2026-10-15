@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Render the route plan for the current config plus a proposed addition.
+
+Usage:  python3 tools/plan-preview [--add ADDRESS] [--expand] [--name NAME]
+
+Read-only: it prints exactly which `ip rule` / `ip route` commands a fix would
+run, without touching the system. Handy for reviewing a change before applying
+it, and safe to run as a normal user.
+"""
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "src/usr/lib/lan-route-fixer"))
+os.environ.setdefault(
+    "LAN_ROUTE_FIXER_STATE", f"/tmp/lanrf-plan-preview-{os.getuid()}.json"
+)
+
+from lanrf.backends import get_backend  # noqa: E402
+from lanrf.config import load_config  # noqa: E402
+from lanrf.reconcile import build_state  # noqa: E402
+from lanrf.routing import InterfaceSelector  # noqa: E402
+from lanrf.targets import normalize_targets  # noqa: E402
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", help="config file to read")
+    parser.add_argument("--add", help="propose adding this address")
+    parser.add_argument("--expand", action="store_true", help="propose --expand for --add")
+    parser.add_argument("--name", help="name for --add")
+    args = parser.parse_args(argv)
+
+    config = load_config(args.config)
+    raw = [dict(target) for target in config.targets]
+    if args.add:
+        entry = {
+            "name": args.name or args.add,
+            "address": args.add,
+            "interface": "",
+            "enabled": True,
+        }
+        if args.expand:
+            entry["expand"] = True
+        raw = [target for target in raw if target.get("address") != args.add] + [entry]
+    config.data["targets"] = normalize_targets(raw)
+
+    backend = get_backend()
+    selector = InterfaceSelector(backend)
+    if hasattr(backend, "invalidate"):
+        backend.invalidate()
+    # can_mutate=True: the point of this tool is to show what a privileged
+    # repair *would* run, even though this process cannot run it itself.
+    snapshots, actions = build_state(
+        config.targets, config, backend, selector=selector, can_mutate=True
+    )
+
+    print(f"routing_mode={config.routing_mode} rule_table={config.rule_table} "
+          f"rule_preference={config.rule_preference}")
+    print()
+    print("targets:")
+    for snapshot in snapshots:
+        if snapshot.get("skipped"):
+            print(f"  -  {snapshot.get('address'):<18} {snapshot.get('state')} "
+                  f"({snapshot.get('reason')})")
+            continue
+        print(
+            f"  {'ok ' if snapshot.get('ok') else 'bad'} {snapshot.get('address'):<18}"
+            f" -> {snapshot.get('effective_address'):<20}"
+            f" dev={snapshot.get('desired') or '-':<12}"
+            f" state={snapshot.get('state')}"
+        )
+    print()
+    if not actions:
+        print("actions: none (everything already matches)")
+        return 0
+    print(f"actions ({len(actions)}):")
+    for action in actions:
+        if action["kind"] == "rule":
+            print(f"  ip rule add pref {action['preference']} to {action['destination']} "
+                  f"lookup {action['table']}")
+        elif action["kind"] == "route":
+            print(f"  ip -{action['family']} route replace {action['destination']} "
+                  f"dev {action['interface']}"
+                  + (f" src {action['source']}" if action.get("source") else "")
+                  + f" table {action['table']} proto 66")
+        elif action["kind"] == "delete-rule":
+            print(f"  ip rule del to {action['destination']} lookup {action['table']}  (stale)")
+        else:
+            print(f"  {action['kind']} {action.get('destination')}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

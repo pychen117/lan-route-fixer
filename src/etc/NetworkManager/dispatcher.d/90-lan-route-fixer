@@ -1,12 +1,21 @@
 #!/bin/sh
-# Reapply lan-route-fixer host routes whenever a network interface or VPN
-# link changes state. This script is invoked by NetworkManager as root.
+# Reapply lan-route-fixer host routes whenever a network interface or VPN link
+# changes state. This script is invoked by NetworkManager as root.
+#
+# The repair itself is delegated to systemd so that concurrent events are
+# coalesced and the work is journaled with the rest of the unit's output. The
+# event driven daemon (lan-route-fixer-daemon.service) already covers this case
+# with lower latency; this hook remains for systems running without it.
 INTERFACE="$1"
 STATUS="$2"
 
 case "$STATUS" in
     up|down|dhcp4-change|dhcp6-change|connectivity-change|vpn-up|vpn-down)
-        /usr/libexec/lan-route-fixer/lan-route-fixer-apply
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl start --no-block lan-route-fixer.service 2>/dev/null
+        else
+            /usr/libexec/lan-route-fixer/lan-route-fixer-apply >/dev/null 2>&1
+        fi
         ;;
 esac
 
