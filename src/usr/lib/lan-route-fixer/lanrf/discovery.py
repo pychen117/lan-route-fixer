@@ -42,13 +42,22 @@ def avahi_resolve(address, timeout=2):
     return fields[1].rstrip(".") if len(fields) == 2 else ""
 
 
-def detect_targets(resolve_names=True, backend=None):
-    """Discover private IPv4 LAN neighbours from the neighbour table."""
+def detect_targets(resolve_names=True, backend=None, record=True):
+    """Discover private IPv4 LAN neighbours from the neighbour table.
+
+    Unless *record* is false, the addresses are also written to the discovery
+    cache: that timestamp is what lets cleanup tell "I turned this off last
+    week" apart from "this device disappeared in March".
+    """
     backend = backend or get_backend()
     output = run_ip_ok("-4", "neigh", "show")
     if not output:
         return []
     discovered = parse_neighbours(output)
+    if record and discovered:
+        from .cleanup import update_discovery_cache
+
+        update_discovery_cache([target["address"] for target in discovered])
     if not discovered or not resolve_names:
         return discovered
     if not avahi_resolve_path():

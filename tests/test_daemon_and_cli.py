@@ -509,5 +509,215 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.backend.calls, [])
 
 
+class PruneCliTests(unittest.TestCase):
+    """`lan-route-fixer prune` walks the same code the GUI cleanup page uses."""
+
+    def setUp(self):
+        from lanrf.config import DISCOVERY_CACHE_PATH
+        from lanrf.model import ROUTE_PROTOCOL_NAME
+
+        self.protocol = ROUTE_PROTOCOL_NAME
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.config_path = Path(self._tmpdir.name) / "config.json"
+        self.discovery_path = Path(self._tmpdir.name) / "discovered.json"
+        self._default_cache = Path(DISCOVERY_CACHE_PATH)
+        # An empty cache means "nothing was ever seen", which is deterministic
+        # regardless of what the real neighbour table looked like.
+        self._write_cache({})
+        self.backend = FakeBackend()
+        self._previous = set_backend(self.backend)
+
+    def tearDown(self):
+        set_backend(self._previous)
+        import lanrf.cleanup as cleanup
+
+        cleanup.DISCOVERY_CACHE_PATH = self._default_cache
+        self._tmpdir.cleanup()
+
+    def _write_cache(self, seen):
+        self.discovery_path.write_text(
+            json.dumps({"version": 1, "updated_at": 0, "seen": seen}), encoding="utf-8"
+        )
+        import lanrf.cleanup as cleanup
+
+        cleanup.DISCOVERY_CACHE_PATH = self.discovery_path
+
+    def _write_config(self, targets, **extra):
+        payload = {"targets": targets, "routing_mode": "rule", "rule_table": 168}
+        payload.update(extra)
+        self.config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def _run(self, *argv):
+        from lanrf.cli import cli_main
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli_main(list(argv))
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_dry_run_lists_residue_without_touching_anything(self):
+        self.backend.add_raw_route(
+            "192.168.4.99/32", "wlp0s20f3", table="168", protocol=self.protocol
+        )
+        self._write_config(
+            [
+                {"name": "u55c", "address": "192.168.4.19", "enabled": True},
+                {"name": "旧设备", "address": "192.168.4.77", "enabled": False},
+            ]
+        )
+
+        code, stdout, stderr = self._run("--config", str(self.config_path), "prune")
+
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("192.168.4.99/32", stdout)
+        self.assertIn("192.168.4.77", stdout)
+        self.assertIn("预演", stdout)
+        self.assertIn("192.168.4.99/32", self.backend.route_prefixes("168"))
+        self.assertIn(
+            "192.168.4.77",
+            [target["address"] for target in json.loads(self.config_path.read_text())["targets"]],
+        )
+
+    def test_yes_removes_orphan_route_and_keeps_configured_targets(self):
+        self.backend.add_raw_route(
+            "192.168.4.99/32", "wlp0s20f3", table="168", protocol=self.protocol
+        )
+        self.backend.add_raw_route(
+            "192.168.4.19/32", "wlp0s20f3", table="168", protocol=self.protocol
+        )
+        self._write_config(
+            [{"name": "u55c", "address": "192.168.4.19", "enabled": True}]
+        )
+
+        code, _stdout, stderr = self._run(
+            "--config", str(self.config_path), "prune", "--routes", "--yes"
+        )
+
+        self.assertEqual(code, 0, stderr)
+        self.assertNotIn("192.168.4.99/32", self.backend.route_prefixes("168"))
+        self.assertIn("192.168.4.19/32", self.backend.route_prefixes("168"))
+
+    def test_yes_drops_a_disabled_never_seen_target(self):
+        self._write_config(
+            [
+                {"name": "keep", "address": "192.168.4.19", "enabled": True},
+                {"name": "drop", "address": "192.168.4.77", "enabled": False},
+            ]
+        )
+
+        code, _stdout, stderr = self._run(
+            "--config", str(self.config_path), "prune", "--targets", "--yes"
+        )
+
+        self.assertEqual(code, 0, stderr)
+        saved = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual([target["address"] for target in saved["targets"]], ["192.168.4.19"])
+
+    def test_retention_window_comes_from_the_config_file(self):
+        import time
+
+        self._write_cache({"192.168.4.77": time.time() - 5 * 86400})
+        self._write_config(
+            [{"name": "drop", "address": "192.168.4.77", "enabled": False}],
+            prune_after_days=3,
+        )
+
+        code, stdout, _stderr = self._run("--config", str(self.config_path), "prune")
+        self.assertEqual(code, 0)
+        self.assertIn("192.168.4.77", stdout)
+
+        # ...and a --days override wins for that one run.
+        code, stdout, _stderr = self._run(
+            "--config", str(self.config_path), "prune", "--days", "30"
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("没有需要清理的内容", stdout)
+
+    def test_a_refused_removal_is_reported_and_exits_nonzero(self):
+        self.backend.add_raw_route(
+            "192.168.4.99/32", "wlp0s20f3", table="168", protocol=self.protocol
+        )
+        self._write_config([])
+        self.backend.remove_route = lambda item: False  # kernel said no
+
+        code, stdout, stderr = self._run(
+            "--config", str(self.config_path), "prune", "--yes"
+        )
+
+        self.assertEqual(code, 1)
+        self.assertIn("失败", stdout)
+        self.assertIn("sudo lan-route-fixer prune --yes", stderr)
+
+    def test_json_output_carries_the_report_and_what_was_applied(self):
+        self.backend.add_raw_route(
+            "192.168.4.99/32", "wlp0s20f3", table="168", protocol=self.protocol
+        )
+        self._write_config([])
+
+        code, stdout, _stderr = self._run(
+            "--config", str(self.config_path), "prune", "--yes", "--json"
+        )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout)
+        self.assertTrue(payload["applied"])
+        self.assertEqual(payload["report"]["routes"]["count"], 1)
+        self.assertEqual(payload["routes"][0]["removed_count"], 1)
+
+    def test_nothing_to_do_is_a_success(self):
+        self._write_config([])
+        code, stdout, _stderr = self._run("--config", str(self.config_path), "prune")
+        self.assertEqual(code, 0)
+        self.assertIn("没有需要清理的内容", stdout)
+
+    def test_another_users_config_is_not_edited_without_root(self):
+        """Only roots get to rewrite somebody else's config file."""
+        from unittest import mock
+
+        import lanrf.cleanup as cleanup
+        import lanrf.cli as cli
+
+        other = "/home/someone/.config/lan-route-fixer/config.json"
+        report = {
+            "routes": {"tables": ["168"], "keep": [], "routes": [], "count": 0},
+            "targets": [
+                {
+                    "path": str(self.config_path),
+                    "count": 1,
+                    "candidates": [
+                        {"name": "drop", "address": "192.168.4.77",
+                         "detail": "从未出现", "reason": "never-seen"}
+                    ],
+                },
+                {
+                    "path": other,
+                    "count": 1,
+                    "candidates": [
+                        {"name": "other", "address": "10.0.0.9",
+                         "detail": "从未出现", "reason": "never-seen"}
+                    ],
+                },
+            ],
+            "count": 2,
+            "prune_after_days": 30,
+        }
+        pruned = []
+
+        def fake_prune_targets(config, candidates, save=True):
+            pruned.append(str(config.path))
+            return {"removed": [], "removed_count": 0, "saved": True}
+
+        with mock.patch.object(cleanup, "analyze", return_value=report), \
+                mock.patch.object(cleanup, "prune_targets", side_effect=fake_prune_targets), \
+                mock.patch.object(cli, "CONFIG_PATH", self.config_path), \
+                mock.patch("os.geteuid", return_value=1000):
+            code, stdout, stderr = self._run("prune", "--targets", "--yes")
+
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(pruned, [str(self.config_path)])
+        self.assertIn("跳过其他用户", stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

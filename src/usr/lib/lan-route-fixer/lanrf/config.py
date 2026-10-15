@@ -26,6 +26,10 @@ SYSTEM_CONFIG_PATH = Path(
 )
 SYSTEM_CONFIG_DIR = SYSTEM_CONFIG_PATH.parent
 
+# Where discovery records when each address was last seen, so targets that have
+# vanished from the LAN can be offered for cleanup (see lanrf.cleanup).
+DISCOVERY_CACHE_PATH = CONFIG_HOME / "lan-route-fixer/discovered.json"
+
 # State written by the root daemon and read by unprivileged clients.
 STATE_PATH = Path(
     os.environ.get("LAN_ROUTE_FIXER_STATE", "/run/lan-route-fixer/state.json")
@@ -51,6 +55,9 @@ DEFAULT_CONFIG = {
     "expand_host_targets": False,
     # Extra local ports to probe when diagnosing connectivity (debug aid).
     "log_level": "info",
+    # Disabled targets that have not been seen on the LAN for this many days are
+    # offered for cleanup. Never applied automatically.
+    "prune_after_days": 30,
 }
 
 # Keys copied verbatim from a saved file when the type looks right.
@@ -63,6 +70,7 @@ _PASSTHROUGH_KEYS = (
     "rule_preference",
     "expand_host_targets",
     "log_level",
+    "prune_after_days",
 )
 
 VALID_ROUTING_MODES = ("rule", "main")
@@ -140,6 +148,14 @@ class Config:
     def expand_host_targets(self):
         return bool(self.data.get("expand_host_targets", False))
 
+    @property
+    def prune_after_days(self):
+        try:
+            days = int(self.data.get("prune_after_days", 30))
+        except (TypeError, ValueError):
+            return 30
+        return max(1, days)
+
     # -- persistence --------------------------------------------------------
 
     def to_dict(self):
@@ -154,6 +170,7 @@ class Config:
                 "rule_table": self.data.get("rule_table", 168),
                 "rule_preference": self.data.get("rule_preference", 1200),
                 "expand_host_targets": self.data.get("expand_host_targets", False),
+                "prune_after_days": self.data.get("prune_after_days", 30),
             }
         )
         return payload
@@ -201,7 +218,13 @@ def save_config(config, path=None):
 
 
 def collect_config_paths(extra_paths=()):
-    """All config files that currently exist: system, then every user."""
+    """All config files that currently exist: system, then the caller's own.
+
+    Root additionally sees every user's file, because the daemon has to protect
+    targets configured by anyone. An ordinary user only gets the system config
+    plus their own: reading (let alone rewriting) another user's file is not
+    this tool's business, and it keeps unprivileged runs predictable.
+    """
     paths = []
     for candidate in (SYSTEM_CONFIG_PATH, *(Path(p) for p in extra_paths)):
         if candidate.is_file() and candidate not in paths:
@@ -211,11 +234,23 @@ def collect_config_paths(extra_paths=()):
     except ImportError:  # pragma: no cover - Windows
         pwd = None
     if pwd is not None:
+        try:
+            current_uid = os.geteuid()
+        except AttributeError:  # pragma: no cover - non-POSIX
+            current_uid = 0
         for entry in pwd.getpwall():
             if 0 < entry.pw_uid < 1000:
                 continue
-            home = entry.pw_dir or ""
-            candidate = Path(home) / ".config/lan-route-fixer/config.json"
+            if current_uid != 0 and entry.pw_uid != current_uid:
+                continue
+            if entry.pw_uid == current_uid:
+                # The caller's own file is CONFIG_PATH, which honours
+                # XDG_CONFIG_HOME; the hardcoded ~/.config path would ignore it.
+                candidate = CONFIG_PATH
+            else:
+                candidate = Path(entry.pw_dir or "") / ".config/lan-route-fixer/config.json"
+            if str(candidate) == str(SYSTEM_CONFIG_PATH):
+                continue
             if candidate.is_file() and candidate not in paths:
                 paths.append(candidate)
     return paths

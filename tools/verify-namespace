@@ -221,6 +221,39 @@ check "the kernel reaches the host through lan0" \
     sh -c "ip route get $TARGET | grep -q 'dev lan0'"
 echo
 
+echo "== 8. prune reclaims proto 66 residue and nothing else =="
+# Residue: a route and a rule this tool would have installed, left behind with
+# no config target behind them any more.
+ORPHAN=192.168.4.61
+FOREIGN=192.168.4.77
+ip rule add pref "$PREF" to "$ORPHAN/32" lookup "$TABLE" 2>/dev/null
+ip route replace "$ORPHAN/32" dev lan0 table "$TABLE" proto 66
+# Someone else's route in the same table must survive the cleanup.
+ip route replace "$FOREIGN/32" dev vpn0 table "$TABLE" proto boot
+cat > "$CONFIG" <<JSON
+{"targets":[],"routing_mode":"rule","rule_table":$TABLE,"rule_preference":$PREF}
+JSON
+check "dry run lists the orphan but leaves it in place" \
+    sh -c "'$PYTHON' '$BIN' --config '$CONFIG' prune --routes >/dev/null &&
+           ip route show table $TABLE exact $ORPHAN/32 | grep -q 'dev lan0'"
+check "prune --yes removes the orphan route" \
+    sh -c "'$PYTHON' '$BIN' --config '$CONFIG' prune --routes --yes >/dev/null &&
+           ! ip route show table $TABLE exact $ORPHAN/32 | grep -q 'dev lan0'"
+check "prune --yes removes the orphan policy rule" \
+    sh -c "! ip rule show | grep -q \"to $ORPHAN/32 lookup $TABLE\""
+check "a foreign proto in our table is never touched" \
+    sh -c "ip route show table $TABLE exact $FOREIGN/32 | grep -q 'dev vpn0'"
+# A route that still belongs to an enabled target must survive the same prune.
+cat > "$CONFIG" <<JSON
+{"targets":[{"name":"u55c","address":"$TARGET","interface":"lan0","enabled":true}],
+ "routing_mode":"rule","rule_table":$TABLE,"rule_preference":$PREF}
+JSON
+ip route replace "$TARGET/32" dev lan0 table "$TABLE" proto 66
+check "a configured target keeps its route through prune" \
+    sh -c "'$PYTHON' '$BIN' --config '$CONFIG' prune --routes --yes >/dev/null &&
+           ip route show table $TABLE exact $TARGET/32 | grep -q 'dev lan0'"
+echo
+
 rm -rf "$WORKDIR"
 echo "== result =="
 echo "  passed: $PASS"

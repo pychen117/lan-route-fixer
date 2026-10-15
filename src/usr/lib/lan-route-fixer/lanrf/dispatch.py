@@ -18,6 +18,7 @@ CLI_COMMANDS = frozenset(
         "daemon",
         "status",
         "doctor",
+        "prune",
         "list",
         "add",
         "remove",

@@ -14,6 +14,7 @@ Package layout
 ``reconcile``   the pure inspect/plan/apply engine
 ``checks``      read-only status for the CLI and the GUI
 ``discovery``   LAN neighbour discovery
+``cleanup``     garbage collection for routes/rules and stale targets
 ``privileged``  client side of the PolicyKit boundary
 ``helper``      inside of the trust boundary: validation + kernel mutations
 ``system``      multi-config reconciliation for root-owned background paths
@@ -25,6 +26,7 @@ Package layout
 __all__ = [
     "backends",
     "checks",
+    "cleanup",
     "cli",
     "config",
     "daemon",
@@ -42,4 +44,4 @@ __all__ = [
     "windows",
 ]
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"

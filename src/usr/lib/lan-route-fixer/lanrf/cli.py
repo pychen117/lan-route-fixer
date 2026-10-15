@@ -12,13 +12,11 @@ import os
 import sys
 import time
 
-from . import model
 from .backends import get_backend
 from .checks import check_targets, summarize
 from .config import (
     CONFIG_PATH,
     DEFAULT_CONFIG,
-    Config,
     collect_all_configs,
     load_config,
     read_state,
@@ -152,6 +150,17 @@ def build_parser():
     status.add_argument("--json", action="store_true", help="output JSON")
     status.add_argument("--daemon", action="store_true", help="show the daemon's own state file")
 
+    prune = subparsers.add_parser(
+        "prune",
+        help="clean up leftover routes/rules and forgotten targets (dry run by default)",
+    )
+    prune.add_argument("--yes", action="store_true", help="actually remove, not just list")
+    prune.add_argument("--routes", action="store_true", help="only clean up routes and rules")
+    prune.add_argument("--targets", action="store_true", help="only clean up config targets")
+    prune.add_argument("--days", type=int, default=None,
+                       help="a disabled target unseen for this many days is offered")
+    prune.add_argument("--json", action="store_true", help="output JSON")
+
     doctor = subparsers.add_parser("doctor", help="explain why a LAN device is unreachable")
     doctor.add_argument("--json", action="store_true", help="output JSON")
     doctor.add_argument("--no-probe", action="store_true", help="skip active TCP probes")
@@ -218,6 +227,9 @@ def cli_main(argv):
             return 0 if report["worst"] >= 1 else 1
         print(format_findings(report["findings"], use_color=not args.no_color))
         return 0 if report["worst"] >= 1 else 1
+
+    if args.command == "prune":
+        return _handle_prune(args)
 
     if args.command == "status":
         if args.daemon:
@@ -326,6 +338,107 @@ def cli_main(argv):
 
     parser.print_help()
     return 2
+
+
+def _handle_prune(args):
+    """List (and optionally remove) everything the tool has left behind."""
+    from .backends import get_backend
+    from .cleanup import analyze, keep_configs, prune_routes, prune_targets
+    from .config import load_config
+
+    paths = [args.config] if args.config is not None else None
+    # The retention window lives in the config file; --days overrides it for
+    # one run so the user can spot-check "what would 7 days have removed?".
+    days = args.days if args.days is not None else load_config(args.config).prune_after_days
+    report = analyze(config_paths=paths, prune_days=days)
+
+    # Deleting entries from another user's config file is root's business.
+    # Without an explicit --config an unprivileged run only edits the caller's
+    # own file (route ownership is a separate, wider keep-set; see keep_configs).
+    allowed_paths = None
+    if os.geteuid() != 0:
+        allowed_paths = {str(CONFIG_PATH)}
+        if paths:
+            allowed_paths.update(str(path) for path in paths)
+
+    do_routes = args.routes or not args.targets
+    do_targets = args.targets or not args.routes
+    route_outcomes = []
+    target_outcomes = []
+    failures = []
+
+    if do_routes and report["routes"]["count"]:
+        if not args.json:
+            print(f"路由与规则残留（表 {', '.join(report['routes']['tables'])}）：")
+            for item in report["routes"]["routes"]:
+                print(f"  · {item['label']}")
+        if args.yes:
+            # Same keep-set the report used: discovered configs plus the
+            # explicit one, so a narrow --config cannot orphan a live route.
+            outcome = prune_routes(get_backend(), keep_configs(paths))
+            route_outcomes.append(outcome)
+            failures.extend(outcome["failed"])
+            if not args.json:
+                print(f"  已清理 {outcome['removed_count']} 项"
+                      + (f"，失败 {outcome['failed_count']} 项" if outcome["failed_count"] else ""))
+                for failure in outcome["failed"]:
+                    print(f"    ! {failure}")
+        elif not args.json:
+            print("  （删除路由与规则需要管理员权限：sudo lan-route-fixer prune --yes）")
+
+    if do_targets:
+        for entry in report["targets"]:
+            if not entry["count"]:
+                continue
+            if allowed_paths is not None and entry["path"] not in allowed_paths:
+                if not args.json:
+                    print(
+                        f"跳过其他用户的配置（需要 root）：{entry['path']}"
+                        f"（{entry['count']} 条）"
+                    )
+                continue
+            if not args.json:
+                print(f"配置文件中可清理的条目：{entry['path']}")
+                for candidate in entry["candidates"]:
+                    print(f"  · {candidate['address']:<18} {candidate['detail']}")
+            if args.yes:
+                config = load_config(entry["path"])
+                outcome = prune_targets(config, entry["candidates"])
+                target_outcomes.append({"path": entry["path"], **outcome})
+                if not args.json:
+                    print(f"  已从配置移除 {outcome['removed_count']} 条")
+
+    total = report["routes"]["count"] + sum(entry["count"] for entry in report["targets"])
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "report": report,
+                    "applied": args.yes,
+                    "routes": route_outcomes,
+                    "targets": target_outcomes,
+                    "failed": failures,
+                },
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        )
+    elif total == 0:
+        print("没有需要清理的内容")
+    elif not args.yes:
+        print()
+        print("以上为预演（未改动任何东西）。确认后执行：lan-route-fixer prune --yes")
+
+    if failures:
+        if not args.json:
+            print(
+                "有项目没有删掉：删除路由与规则需要管理员权限，请用 "
+                "sudo lan-route-fixer prune --yes 重试。",
+                file=sys.stderr,
+            )
+        return 1
+    return 0
 
 
 def _print_daemon_state(state):

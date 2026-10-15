@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""Headless smoke test for the GUI widget tree.
+
+Run:  gdk-backend=broadway bash tools/gui-smoke   (or any display)
+
+It builds every page, opens the editor, renders a pretend check result and the
+cleanup list against an in-memory backend, then walks the widget tree. This
+catches GTK/libadwaita API mistakes without a human clicking through the app.
+"""
+
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "src/usr/lib/lan-route-fixer"))
+sys.path.insert(0, str(REPO_ROOT / "tests"))
+
+# Isolate config/state before lanrf resolves the paths at import time.
+SANDBOX = tempfile.mkdtemp(prefix="lanrf-gui-smoke-")
+os.environ["XDG_CONFIG_HOME"] = os.path.join(SANDBOX, "config")
+os.environ["LAN_ROUTE_FIXER_STATE"] = os.path.join(SANDBOX, "state.json")
+os.environ["LAN_ROUTE_FIXER_SYSTEM_CONFIG"] = os.path.join(SANDBOX, "system.json")
+
+import gi  # noqa: E402
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gtk  # noqa: E402
+
+from support import FakeBackend  # noqa: E402
+from lanrf import cleanup as cleanup_module  # noqa: E402
+from lanrf.backends import set_backend  # noqa: E402
+from lanrf.checks import check_targets  # noqa: E402
+from lanrf.config import save_config  # noqa: E402
+
+FAILURES = []
+
+
+def expect(label, condition, detail=""):
+    if condition:
+        print(f"  \033[32m✓\033[0m {label}")
+    else:
+        print(f"  \033[31m✗\033[0m {label} {detail}")
+        FAILURES.append(label)
+
+
+def walk(widget, depth=0, out=None):
+    out = [] if out is None else out
+    out.append((depth, type(widget).__name__, getattr(widget, "get_title", lambda: "")()))
+    child = widget.get_first_child() if hasattr(widget, "get_first_child") else None
+    while child is not None:
+        walk(child, depth + 1, out)
+        child = child.get_next_sibling()
+    return out
+
+
+def main():
+    backend = FakeBackend()
+    # Pretend a VPN stole the whole /24 in the main table.
+    backend.add_raw_route("192.168.4.0/24", "utun7", protocol="boot")
+    # ...and that this tool left two orphan routes behind.
+    backend.add_raw_route("192.168.4.61/32", "wlp0s20f3", table="168", protocol="lanrf")
+    backend.ensure_rule("192.168.4.61/32", "168")
+    set_backend(backend)
+
+    print("== writing a sandbox config ==")
+    save_config(
+        {
+            "targets": [
+                {"name": "u55c", "address": "192.168.4.19", "interface": "", "enabled": True},
+                {"name": "家庭局域网", "address": "192.168.4.234", "interface": "", "enabled": True,
+                 "expand": True},
+                {"name": "旧设备", "address": "192.168.4.77", "interface": "", "enabled": False},
+            ],
+            "auto_fix": True,
+            "routing_mode": "rule",
+            "rule_table": 168,
+            "rule_preference": 1200,
+        }
+    )
+    print("  config written to", os.environ["XDG_CONFIG_HOME"])
+
+    import app as app_module
+
+    Adw.init()
+    application = app_module.LanRouteFixer()
+    # GApplication refuses windows before ::startup; emit it exactly like a real
+    # launch would so the smoke test exercises the same path.
+    application.register(None)
+    application.emit("startup")
+
+    print("== building the window ==")
+    application._build_window()
+    window = application.window
+    expect("window exists", window is not None)
+    expect("single window only (no settings window attribute)",
+           not hasattr(application, "settings_window"))
+    expect("sidebar has every section",
+           set(application.sidebar_rows) == {key for key, _t, _i in app_module.SECTIONS},
+           str(sorted(application.sidebar_rows)))
+    expect("content stack has every page",
+           set(application.pages) == {key for key, _t, _i in app_module.SECTIONS},
+           str(sorted(application.pages)))
+
+    # on_activate() would do this; the smoke test drives the pieces directly.
+    application._refresh_all()
+
+    print("== page navigation ==")
+    for key, title, _icon in app_module.SECTIONS:
+        application._show_page(key)
+        selected = application.sidebar_list.get_selected_row()
+        expect(f"page {key} selectable", selected is not None and selected.section_key == key)
+    expect("no Adw.PreferencesWindow anywhere in the tree",
+           not any(name == "PreferencesWindow" for _d, name, _t in walk(window)),
+           str([name for _d, name, _t in walk(window) if "Window" in name]))
+
+    print("== targets page renders the configured targets ==")
+    application._show_page("targets")
+    rows = [
+        row for row in app_module.group_rows(application.targets_group)
+        if isinstance(row, app_module.TargetRow)
+    ]
+    expect("three target rows", len(rows) == 3, str(len(rows)))
+    expect("subtitle mentions the subnet override",
+           any("子网" in (row.get_subtitle() or "") for row in rows))
+    expect("disabled target shows as paused",
+           any(row.icon.get_icon_name() == "media-playback-pause-symbolic" for row in rows),
+           str([row.icon.get_icon_name() for row in rows]))
+
+    print("== refreshing twice does not lose or duplicate rows ==")
+    application._refresh_targets()
+    application._refresh_targets()
+    again = app_module.group_rows(application.targets_group)
+    expect("row count is stable across refreshes", len(again) == 3, str(len(again)))
+
+    print("== editor opens as a navigation page ==")
+    depth_before = len(application.content.get_navigation_stack())
+    application._open_editor(application.config["targets"][0])
+    depth_after = len(application.content.get_navigation_stack())
+    expect("editor pushed onto the navigation stack", depth_after == depth_before + 1,
+           f"{depth_before} -> {depth_after}")
+    editor_page = application.content.get_visible_page()
+    expect("editor page is a NavigationPage", isinstance(editor_page, Adw.NavigationPage))
+    expect("editor has a back button",
+           editor_page.get_title() == "编辑目标", editor_page.get_title())
+    application.content.pop()
+
+    print("== routing page reflects the config ==")
+    application._show_page("routing")
+    expect("mode combo selects policy routing", application.mode_combo.get_selected() == 0)
+    expect("table spin row shows 168", int(application.table_row.get_value()) == 168)
+    expect("preference spin row shows 1200", int(application.pref_row.get_value()) == 1200)
+
+    print("== config page shows the raw file ==")
+    application._show_page("config")
+    text = application.config_buffer.get_text(
+        application.config_buffer.get_start_iter(),
+        application.config_buffer.get_end_iter(),
+        False,
+    )
+    expect("raw JSON is displayed", "192.168.4.19" in text)
+    application.config_buffer.set_text('{"targets": [}', -1)
+    expect("broken JSON is rejected", application._validate_config_editor() is False)
+    application.config_buffer.set_text('{"targets": [], "future_key": 1}', -1)
+    expect("valid JSON with unknown keys is accepted",
+           application._validate_config_editor() is True)
+    application._reload_config_editor()
+
+    print("== check results render into the overview ==")
+    results = check_targets(application.config, backend=backend)
+    application.route_results = {result["address"]: result for result in results}
+    application._refresh_overview(results)
+    expect("overview reports a problem", "异常" in application.overview_row.get_title(),
+           application.overview_row.get_title())
+    expect("overview lists both enabled targets",
+           len(app_module.group_rows(application.overview_group)) == 2,
+           str(len(app_module.group_rows(application.overview_group))))
+
+    print("== cleanup page finds the residue ==")
+    report = cleanup_module.analyze(
+        backend=backend,
+        config_paths=[Path(os.environ["XDG_CONFIG_HOME"]) / "lan-route-fixer/config.json"],
+        discovery={},
+        prune_days=30,
+    )
+    application._on_cleanup_scan_done(report, "")
+    expect("orphan route detected",
+           any("192.168.4.61" in item["label"] for item in report["routes"]["routes"]),
+           str([item["label"] for item in report["routes"]["routes"]]))
+    expect("disabled never-seen target offered",
+           any(c["address"] == "192.168.4.77"
+               for entry in report["targets"] for c in entry["candidates"]),
+           str(report["targets"]))
+    expect("cleanup button enabled in the UI",
+           application.cleanup_button.get_sensitive())
+    expect("cleanup badge on the sidebar",
+           application.sidebar_rows["cleanup"].badge.get_text() != "",
+           application.sidebar_rows["cleanup"].badge.get_text())
+
+    print("== widget tree summary ==")
+    tree = walk(window)
+    print(f"  {len(tree)} widgets, {len({name for _d, name, _t in tree})} distinct types")
+    for name in ("NavigationSplitView", "NavigationView", "NavigationPage",
+                 "PreferencesPage", "PreferencesGroup", "ToastOverlay", "Clamp"):
+        expect(f"tree contains {name}", any(entry[1] == name for entry in tree))
+
+    print()
+    if FAILURES:
+        print(f"\033[31m{len(FAILURES)} check(s) failed\033[0m")
+        for name in FAILURES:
+            print("  -", name)
+        return 1
+    print("\033[32mall GUI checks passed\033[0m")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

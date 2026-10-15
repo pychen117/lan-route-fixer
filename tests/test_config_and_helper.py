@@ -337,5 +337,62 @@ class ProtocolStampTests(unittest.TestCase):
         self.assertFalse(foreign["owned"])
 
 
+class ConfigDiscoveryScopeTests(unittest.TestCase):
+    """Who is allowed to show up in the list of config files."""
+
+    def _entries(self, tmpdir):
+        from types import SimpleNamespace
+
+        other_home = Path(tmpdir) / "other"
+        (other_home / ".config/lan-route-fixer").mkdir(parents=True)
+        other = other_home / ".config/lan-route-fixer/config.json"
+        other.write_text("{}", encoding="utf-8")
+        entries = [
+            SimpleNamespace(pw_uid=0, pw_dir="/root"),
+            SimpleNamespace(pw_uid=1000, pw_dir=str(Path(tmpdir) / "me")),
+            SimpleNamespace(pw_uid=1001, pw_dir=str(other_home)),
+        ]
+        return entries, other
+
+    def test_an_unprivileged_run_ignores_other_users_configs(self):
+        from unittest import mock
+
+        from lanrf import config
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            entries, other = self._entries(tmpdir)
+            system = Path(tmpdir) / "system.json"
+            own = Path(tmpdir) / "me.json"
+            with mock.patch("pwd.getpwall", return_value=entries), \
+                    mock.patch("os.geteuid", return_value=1000), \
+                    mock.patch.object(config, "SYSTEM_CONFIG_PATH", system), \
+                    mock.patch.object(config, "CONFIG_PATH", own):
+                self.assertEqual(config.collect_config_paths(), [])
+
+            # The same machine as root sees the other user's file.
+            with mock.patch("pwd.getpwall", return_value=entries), \
+                    mock.patch("os.geteuid", return_value=0), \
+                    mock.patch.object(config, "SYSTEM_CONFIG_PATH", system), \
+                    mock.patch.object(config, "CONFIG_PATH", own):
+                self.assertEqual(config.collect_config_paths(), [other])
+
+    def test_the_callers_own_file_follows_xdg_config_home(self):
+        from unittest import mock
+
+        from lanrf import config
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            entries, _other = self._entries(tmpdir)
+            system = Path(tmpdir) / "system.json"
+            own = Path(tmpdir) / "xdg" / "config.json"
+            own.parent.mkdir()
+            own.write_text("{}", encoding="utf-8")
+            with mock.patch("pwd.getpwall", return_value=entries), \
+                    mock.patch("os.geteuid", return_value=1000), \
+                    mock.patch.object(config, "SYSTEM_CONFIG_PATH", system), \
+                    mock.patch.object(config, "CONFIG_PATH", own):
+                self.assertEqual(config.collect_config_paths(), [own])
+
+
 if __name__ == "__main__":
     unittest.main()

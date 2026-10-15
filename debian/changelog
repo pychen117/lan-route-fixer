@@ -1,3 +1,34 @@
+lan-route-fixer (2.2.0-1) unstable; urgency=medium
+
+  * One window, no nested dialogs: the GTK4 interface is a single
+    Adw.NavigationSplitView with a sidebar (overview, targets, routing, config,
+    cleanup, log) and the target editor slides in as a navigation page instead
+    of opening a second and third window.
+  * The configuration file is the user's, so the app now shows its path,
+    renders the raw JSON, validates edits before saving and can delete it.
+  * New cleanup mechanism against route/target cruft. `lan-route-fixer prune`
+    (dry run by default, --yes to apply) removes routes and policy rules that
+    still carry this tool's proto 66 stamp but no longer belong to an enabled
+    target, and offers disabled targets that have not been seen on the LAN for
+    prune_after_days (default 30). The GUI exposes the same report on a
+    "清理" page with checkboxes; results come from lanrf/cleanup.py so the CLI,
+    the GUI and the tests share one implementation.
+  * `scan` records when each neighbour was last seen (discovery cache), which
+    is what lets cleanup tell "I disabled this last week" apart from "this
+    device disappeared in March".
+  * A refused kernel delete is now reported as a failure instead of a success,
+    so `prune --yes` exits non-zero and says it needs root.
+  * Config discovery is scoped: an unprivileged run reads the system config and
+    the caller's own file only (root still sees every user's, as the daemon
+    must). Route ownership is still computed from every discovered config plus
+    an explicit --config, so a narrow --config can never make a live route look
+    like residue.
+  * New tools/gui-smoke (headless widget-tree smoke test, 40+ checks) and
+    tools/gui-screenshot (renders every page to PNG for the README); the
+    end-to-end namespace check grew five prune checks (26 total).
+
+ -- pychen117 <pychen117@163.com>  Thu, 16 Oct 2025 00:30:00 +0800
+
 lan-route-fixer (2.1.0-1) unstable; urgency=medium
 
   * Event driven repair: new lan-route-fixer-daemon.service subscribes to

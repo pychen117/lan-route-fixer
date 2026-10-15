@@ -103,6 +103,67 @@ busctl call io.github.pychen117.LanRouteFixer /Daemon \
 而他本来只要等下一个内核路由事件就能得到同样结果。
 `pkexec` 仍然保留，用于"目标不在任何配置文件里"这种守护进程无法覆盖的情况。
 
+## 2.2.0：一个窗口的界面 + 清理机制
+
+2.1.0 解决的是"修得快不快"，2.2.0 解决的是"用久了界面越点越乱、残留越堆越多"。
+
+### 侧栏单窗口，不再叠三层
+
+之前的界面打开设置是**第二个窗口**，点编辑目标又是**第三个窗口**，
+关的时候要一层层关回去，很容易迷路。2.2.0 改成
+`Adw.NavigationSplitView`：左侧栏（概览 / 修复目标 / 路由与后台 / 配置文件 /
+清理 / 运行记录），所有内容都在右半边，编辑目标作为 navigation page 滑入，
+左上角返回。侧栏带徽标（几个目标异常、几项可清理），不用点进去就知道状态。
+
+![界面总览](docs/screenshots/overview.png)
+
+![修复目标](docs/screenshots/targets.png)
+
+### 配置文件页：文件是你的
+
+「配置文件」页显示配置文件的真实路径和**原始 JSON**，可以直接改、可以校验、
+可以保存，也可以删除整个文件重新开始。保存前会先解析一遍 JSON，
+语法错误会被拒绝而不是写坏文件；无法识别的键会原样保留（和 CLI 行为一致）。
+
+![配置文件](docs/screenshots/config.png)
+
+### 清理页：别让残留的 IP 堆成屎山
+
+两类垃圾会慢慢堆积：
+
+1. **路由与规则残留**：目标删掉或停用后，之前装的 `proto 66` 路由和
+   `ip rule` 不一定有人回收（守护进程运行时才会顺带回收；没开守护进程、
+   配置被手工删掉、或换机器时就会留下）。
+2. **配置里的僵尸条目**：`scan` 会把整个局域网的手机、打印机都扫出来，
+   真正启用的往往只有两台，其余的作为「已停用」条目永远躺在配置里。
+
+清理页把两者列出来，勾选后删除；命令行是同一套实现：
+
+```sh
+lan-route-fixer prune                     # 预演，只列不改
+lan-route-fixer prune --yes               # 真正清理配置条目（不需要 root）
+sudo lan-route-fixer prune --yes          # 连路由和规则一起删（需要 root）
+lan-route-fixer prune --routes --days 7   # 只看路由残留，保留窗口临时改成 7 天
+```
+
+![清理](docs/screenshots/cleanup.png)
+
+判定规则刻意保守：
+
+- **只碰自己装的东西**：路由必须带 `proto 66`，规则必须指向本工具的表；
+  Tailscale 的规则、VPN 的路由、DHCP 默认路由一律不动。
+- **只清理已停用的目标**：开启中的目标无论离线多久都不会被建议删除——
+  那是用户的决定，不是垃圾。
+- **不碰别人的配置文件**：非 root 运行时只会读「系统配置 + 自己的配置」，
+  也只改自己的（只有 root 能看到所有用户的配置，因为守护进程必须覆盖它们）；
+  而路由归属始终按「所有已发现配置 + 显式 `--config`」计算，所以即使
+  `--config` 指向一个很窄的文件，也不会把别的配置正在用的路由当成垃圾。
+- **保留窗口可配**：`prune_after_days`（默认 30 天）。`scan` 会把每次看到的
+  邻居写进 `~/.config/lan-route-fixer/discovered.json`，
+  这样「上周刚停用」和「三月就消失的设备」可以区分开。
+- **失败就说失败**：删不掉的条目会明确报错并让命令返回非 0，
+  而不是假装清理成功。
+
 ## 安装
 
 从源码构建 `.deb`：
@@ -110,12 +171,12 @@ busctl call io.github.pychen117.LanRouteFixer /Daemon \
 ```sh
 cd lan-route-fixer
 dpkg-buildpackage -us -uc -b
-sudo apt install ../lan-route-fixer_2.1.0-1_all.deb
+sudo apt install ../lan-route-fixer_2.2.0-1_all.deb
 ```
 
 安装后：
 
-- CLI：`lan-route-fixer scan|check|fix|list|status|doctor|daemon|config ...`
+- CLI：`lan-route-fixer scan|check|fix|list|status|doctor|prune|daemon|config ...`
 - GUI：应用菜单打开「局域网路由修复」
 - 后台：`lan-route-fixer-daemon.service`（事件驱动，实测约 0.33 秒修复）
   + `lan-route-fixer.timer`（60 秒兜底）+ NetworkManager dispatcher
@@ -137,6 +198,9 @@ lan-route-fixer fix
 # 4. 确认后台守护进程在跑（这才是 0.33 秒级修复的关键）
 systemctl status lan-route-fixer-daemon.service
 lan-route-fixer status --daemon
+
+# 5. 用久了想清理残留（先预演，确认后再加 --yes）
+lan-route-fixer prune
 ```
 
 > **易踩的坑**：本工具只保护**你配置过**的目标。
@@ -170,11 +234,12 @@ lan-route-fixer add 192.168.4.19 --name "家里局域网" --expand
 
 | 命令 | 说明 |
 | --- | --- |
-| `scan` | 扫描局域网邻居（ARP 邻居表 + mDNS 反解），输出 JSON |
+| `scan` | 扫描局域网邻居（ARP 邻居表 + mDNS 反解），输出 JSON，并记录"最后一次见到"的时间 |
 | `check [--json]` | 检查所有已启用目标，退出码 0/1 便于脚本使用 |
 | `fix [--quiet] [--direct]` | 修复；默认先请守护进程代劳（无授权），`--direct` 强制走 pkexec |
 | `status [--json] [--daemon]` | 目标当前路由状态；`--daemon` 读守护进程状态文件 |
 | `doctor [--json] [--no-probe] [--port N]` | 诊断：环境 / 路由 / 后台 / 连通性，并给出可执行建议 |
+| `prune [--yes] [--routes] [--targets] [--days N] [--json]` | 清理残留路由/规则与早已不用的目标；默认只预演 |
 | `daemon [--once] [--dry-run] [--interval N] [--dbus]` | 事件驱动修复循环；`--dbus` 额外提供控制接口 |
 | `list / add / remove / enable / disable / set-interface` | 目标管理 |
 | `config show\|get\|set\|paths` | 读写配置项 |
@@ -188,6 +253,7 @@ lan-route-fixer config set rule_table 168           # 1..252
 lan-route-fixer config set rule_preference 1200
 lan-route-fixer config set interval_seconds 10      # 守护进程的兜底轮询周期
 lan-route-fixer config set expand_host_targets true # 把 /32 扩成所在子网
+lan-route-fixer config set prune_after_days 30      # 停用多久没出现才建议清理
 ```
 
 ## 路由模型
@@ -217,6 +283,8 @@ lan-route-fixer config set expand_host_targets true # 把 /32 扩成所在子网
 - **源地址固定**：路由带上 `src`，避免 VPN 存在时内核选错源地址。
 - **规则垃圾回收**：目标被删除或停用后，对应的 `ip rule` 会自动清理
   （只清理指向我们自己表的规则，绝不动 Tailscale / 其他工具的规则）。
+
+![路由与后台](docs/screenshots/routing.png)
 
 ## 后台服务
 
@@ -286,6 +354,8 @@ sudo lan-route-fixer daemon --interval 5
 - 用户配置：`~/.config/lan-route-fixer/config.json`
 - 系统级配置：`/etc/lan-route-fixer/config.json`
 - 守护进程状态：`/run/lan-route-fixer/state.json`（无权限时回退到用户配置目录）
+- 邻居发现缓存：`~/.config/lan-route-fixer/discovered.json`（`scan` 写入，
+  `prune` 读取；删掉它只会让"多久没出现"重新开始计时）
 
 ```json
 {
@@ -300,7 +370,8 @@ sudo lan-route-fixer daemon --interval 5
   "routing_mode": "rule",
   "rule_table": 168,
   "rule_preference": 1200,
-  "expand_host_targets": false
+  "expand_host_targets": false,
+  "prune_after_days": 30
 }
 ```
 
@@ -308,6 +379,7 @@ sudo lan-route-fixer daemon --interval 5
 无法识别的键在保存时原样保留，新增键会自动补默认值。
 
 `interface` 留空表示自动选择：先选与目标同网段的网卡，再选默认出口网卡。
+`prune_after_days` 只影响 `prune` / 清理页的**建议**，不会自动删除任何东西。
 
 ## 安全边界
 
@@ -320,17 +392,27 @@ sudo lan-route-fixer daemon --interval 5
 - 路由表限定为 `1..252` 或 `main`；`local`/`default`/`253`/`254`/`255` 会被拒绝；
 - 只会执行 `ip route replace` 和 `ip rule add/del`，没有 flush、没有 shell。
 
+清理路由残留（`sudo lan-route-fixer prune --yes`）直接用 `ip route del` /
+`ip rule del`，因此要 root；它只会删除"扫描时确认带 `proto 66`、
+或指向本工具表"的条目，绝不会去动别人的路由。
+
 守护进程可以额外用 systemd 沙箱限制（见单元文件里的
 `CapabilityBoundingSet` / `ProtectSystem`）。
 
 ## 验证
 
 ```sh
-# 单元测试（不需要 root）
+# 单元测试（不需要 root，189 项）
 python3 -m unittest discover -s tests -t .
 
-# 真实内核端到端验证（不需要 root，在私有网络命名空间里跑，21 项检查）
+# 真实内核端到端验证（不需要 root，在私有网络命名空间里跑，26 项检查）
 bash tools/verify-namespace
+
+# GTK 界面冒烟测试（不需要人点：建好每一页、切页、打开编辑器、渲染清理结果）
+python3 tools/gui-smoke
+
+# 把每一页渲染成 PNG（默认写进 docs/screenshots/）
+python3 tools/gui-screenshot
 
 # 在你自己的机器上验证（需要 root，会临时改路由，默认用空闲表 193 并自动还原）
 sudo bash tools/verify-install
@@ -346,20 +428,26 @@ sudo bash tools/verify-install
 - **修复延迟实测**（3 次抢路由并计时，约 0.33 秒）；
 - 停掉守护进程后没人再修复（证明延迟来自事件而不是轮询）；
 - 删除目标后 `ip rule` 与路由被回收；
-- `routing_mode=main` 兼容模式的行为。
+- `routing_mode=main` 兼容模式的行为；
+- `prune` 在真实路由表里只回收带 `proto 66` 的孤儿路由/规则，
+  同表里别人 `proto boot` 的路由和已配置目标的路由都不会被动。
 
-`--config` 选项、`fix --direct`、D-Bus 接口等则分别有单元测试覆盖。
+`tools/gui-smoke` 在没有人类点击的情况下走完整棵控件树（40+ 项断言），
+`tools/gui-screenshot` 顺手生成下面这些截图。
+
+`--config` 选项、`fix --direct`、D-Bus 接口、`prune` 的预演/执行/失败路径
+等则分别有单元测试覆盖。
 
 ## 项目结构
 
 ```
 src/usr/bin/lan-route-fixer                    入口（CLI / GUI 分发）
-src/usr/lib/lan-route-fixer/app.py             GTK4 / libadwaita 界面
+src/usr/lib/lan-route-fixer/app.py             GTK4 / libadwaita 界面（侧栏单窗口）
 src/usr/lib/lan-route-fixer/core.py            兼容层（保留 2.0.x 的 core.* 名字）
 src/usr/lib/lan-route-fixer/lanrf/             可复用实现
     model.py        纯数据模型（目标、路由条目、proto 标记）
     targets.py      目标解析与校验
-    config.py       配置读写 + 状态发布
+    config.py       配置读写 + 状态发布 + 发现缓存路径
     backends.py     平台后端协议与选择
     linux.py        Linux 后端（ip / sysfs / 路由与规则解析）
     windows.py      Windows 后端骨架（IP Helper API 映射）
@@ -368,6 +456,7 @@ src/usr/lib/lan-route-fixer/lanrf/             可复用实现
     reconcile.py    纯协调引擎（检查 → 计划 → 执行 → 复核）
     checks.py       只读状态检查
     discovery.py    局域网邻居发现
+    cleanup.py      垃圾回收（残留路由/规则 + 僵尸目标），CLI 与 GUI 共用
     privileged.py   提权边界客户端（pkexec）
     helper.py       提权边界内部（校验 + 改内核）
     system.py       多配置文件协调（systemd / dispatcher）
@@ -378,8 +467,11 @@ src/usr/lib/lan-route-fixer/lanrf/             可复用实现
 src/usr/libexec/lan-route-fixer/                特权 helper 与 root 一次性修复
 src/usr/share/dbus-1/system.d/                  D-Bus 访问控制（只有 root 能注册名字）
 src/usr/share/dbus-1/system-services/           D-Bus 激活（GUI 调用时自动拉起守护进程）
+docs/screenshots/                               README 使用的界面截图（tools/gui-screenshot 生成）
 tools/verify-install                            真机验证（需要 root）
-tools/verify-namespace                          真实内核验证（无需 root，21 项检查）
+tools/verify-namespace                          真实内核验证（无需 root，26 项检查）
+tools/gui-smoke                                 GTK 控件树冒烟测试（无需人点击）
+tools/gui-screenshot                            把每一页渲染成 PNG
 tools/plan-preview                              只读预览将要执行的 ip 命令
 tests/                                          单元测试（含假后端）
 ```

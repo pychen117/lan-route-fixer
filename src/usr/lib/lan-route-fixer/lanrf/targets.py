@@ -6,6 +6,9 @@ the CLI, the GUI and the reconciler agree on what a target is.
 
 import ipaddress
 
+# How long a disabled target may stay unseen before cleanup offers to drop it.
+DEFAULT_PRUNED_AFTER_DAYS = 30
+
 # Neighbour states that mean "we have a usable L2 entry for this host".
 NEIGH_VALID_STATES = {"REACHABLE", "STALE", "DELAY", "PROBE", "PERMANENT"}
 

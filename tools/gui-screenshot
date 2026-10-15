@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""Render the real GUI to PNG files, one per page.
+
+Run:  bash tools/gui-screenshot [output-dir]
+
+It uses a throwaway config (the same one the smoke test uses) so it can show a
+populated window without touching the user's real configuration, then paints
+each page with ``Gtk.WidgetPaintable``. The window is shown just long enough to
+be mapped and laid out, then the pages are painted straight into a texture ---
+no screenshot tool, no visible window flashing.
+
+``Gtk.WidgetPaintable`` only paints under a backend that keeps a real GL
+surface for the window; on a Wayland session the XWayland (``x11``) backend is
+used deliberately, because the native Wayland renderer returns an empty node
+for this off-screen case. Set ``GDK_BACKEND`` yourself to override.
+"""
+
+import os
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "src/usr/lib/lan-route-fixer"))
+sys.path.insert(0, str(REPO_ROOT / "tests"))
+
+SANDBOX = tempfile.mkdtemp(prefix="lanrf-gui-shot-")
+os.environ["XDG_CONFIG_HOME"] = os.path.join(SANDBOX, "config")
+os.environ["LAN_ROUTE_FIXER_STATE"] = os.path.join(SANDBOX, "state.json")
+os.environ["LAN_ROUTE_FIXER_SYSTEM_CONFIG"] = os.path.join(SANDBOX, "system.json")
+
+# Must happen before GDK is initialised (i.e. before importing Gtk).
+if "GDK_BACKEND" not in os.environ and os.environ.get("DISPLAY"):
+    os.environ["GDK_BACKEND"] = "x11"
+
+import gi  # noqa: E402
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, GLib, Gtk  # noqa: E402
+
+from support import FakeBackend  # noqa: E402
+from lanrf.backends import set_backend  # noqa: E402
+from lanrf.config import save_config, write_state  # noqa: E402
+
+WIDTH, HEIGHT = 1040, 720
+
+_CONTEXT = GLib.MainContext.default()
+
+
+def settle(seconds=0.25):
+    """Run the main loop for *seconds* of wall time.
+
+    Draining ``pending()`` alone is not enough: the first frame and each
+    ``Adw.NavigationView`` transition need the compositor to hand back a real
+    GL surface, which only happens as time passes.
+    """
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        while _CONTEXT.pending():
+            _CONTEXT.iteration(False)
+        time.sleep(0.01)
+
+
+def snapshot(widget):
+    """The render node for *widget*, or None if it has nothing to paint."""
+    paintable = Gtk.WidgetPaintable.new(widget)
+    snapshot_ = Gtk.Snapshot.new()
+    paintable.snapshot(snapshot_, WIDTH, HEIGHT)
+    return snapshot_.to_node()
+
+
+def render(widget, path, announce=True):
+    """Paint a realised widget to a PNG without showing it on screen."""
+    node = snapshot(widget)
+    if node is None:
+        if announce:
+            print(f"  ! {path.name}: nothing was painted")
+        return False
+    # render_texture() takes only the node and an optional viewport; the size
+    # comes from Gtk.WidgetPaintable.snapshot().
+    native = widget.get_native()
+    if native is None:
+        if announce:
+            print(f"  ! {path.name}: widget is not mapped yet")
+        return False
+    texture = native.get_renderer().render_texture(node, None)
+    texture.save_to_png(str(path))
+    print(f"  ✓ {path}  ({path.stat().st_size // 1024} KiB)")
+    return True
+
+
+def main():
+    out_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else REPO_ROOT / "docs/screenshots"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    backend = FakeBackend()
+    backend.add_raw_route("192.168.4.0/24", "utun7", protocol="boot")
+    backend.add_raw_route("192.168.4.0/25", "wlp0s20f3", protocol="boot")
+    backend.add_raw_route("192.168.4.61/32", "wlp0s20f3", table="168", protocol="lanrf")
+    backend.ensure_rule("192.168.4.61/32", "168")
+    set_backend(backend)
+
+    save_config(
+        {
+            "targets": [
+                {"name": "u55c", "address": "192.168.4.19", "interface": "", "enabled": True},
+                {"name": "eda_T2", "address": "192.168.4.234", "interface": "", "enabled": True},
+                {"name": "4090-1（家庭局域网）", "address": "192.168.4.94", "interface": "",
+                 "enabled": True, "expand": True},
+                {"name": "旧打印机", "address": "192.168.4.77", "interface": "", "enabled": False},
+            ],
+            "auto_fix": True,
+            "routing_mode": "rule",
+            "rule_table": 168,
+            "rule_preference": 1200,
+        }
+    )
+    write_state(
+        {
+            "pid": 1234,
+            "running": True,
+            "reason": "route-event",
+            "updated_at": 0,
+            "interval_seconds": 15,
+            "routing_mode": "rule",
+            "rule_table": 168,
+            "events_supported": True,
+            "targets": 3,
+            "bad": 1,
+            "changed": 12,
+            "snapshots": [],
+            "stats": {"passes": 811, "events": 240, "changes": 12, "failures": 0},
+        }
+    )
+
+    import app as app_module
+
+    Adw.init()
+    application = app_module.LanRouteFixer()
+    application.register(None)
+    application.emit("startup")
+    application._build_window()
+    application._refresh_all()
+    application._log("应用已启动")
+    application._log("路由模式：rule（表 168）")
+    application._log("已通过后台守护进程修复（无需授权）")
+
+    window = application.window
+    window.set_default_size(WIDTH, HEIGHT)
+    window.present()
+    # Let the window map and lay out before painting. The very first snapshot
+    # can land before libadwaita has allocated the page, which paints nothing,
+    # so prime the renderer once and retry any page that comes back empty.
+    for _ in range(20):
+        settle(0.05)
+        if window.get_mapped() and window.get_width() > 1 and window.get_height() > 1:
+            break
+    settle(0.4)
+    snapshot(window)
+
+    failures = []
+
+    def paint(path):
+        for attempt in range(5):
+            if render(window, path, announce=attempt == 4):
+                return
+            settle(0.2)
+        failures.append(path.name)
+
+    for key, title, _icon in app_module.SECTIONS:
+        application._show_page(key)
+        settle(0.3)
+        paint(out_dir / f"{key}.png")
+
+    # The editor is a pushed navigation page.
+    application._show_page("targets")
+    application._open_editor(application.config["targets"][2])
+    settle(0.3)
+    paint(out_dir / "editor.png")
+
+    print()
+    if failures:
+        print(f"failed to paint: {', '.join(failures)}", file=sys.stderr)
+        print(
+            "hint: the snapshot needs a backend with a real GL surface; "
+            "try GDK_BACKEND=x11 on a session with a display.",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"screenshots written to {out_dir}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

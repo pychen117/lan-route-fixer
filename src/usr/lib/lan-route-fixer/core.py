@@ -19,6 +19,16 @@ from lanrf import model
 from lanrf import targets as _targets
 from lanrf.backends import get_backend, set_backend  # noqa: F401
 from lanrf.checks import check_targets  # noqa: F401
+from lanrf.cleanup import (  # noqa: F401
+    analyze as analyze_cleanup,
+    analyze_routes,
+    analyze_targets,
+    keep_configs,
+    prune_routes,
+    prune_targets,
+    read_discovery_cache,
+    update_discovery_cache,
+)
 from lanrf.config import (  # noqa: F401
     APP_DESCRIPTION,
     APP_DISPLAY_NAME,
@@ -27,6 +37,7 @@ from lanrf.config import (  # noqa: F401
     CONFIG_HOME,
     CONFIG_PATH,
     DEFAULT_CONFIG,
+    DISCOVERY_CACHE_PATH,
     SYSTEM_CONFIG_PATH,
     Config,
     apply_autostart,
@@ -123,3 +134,20 @@ def cli_main(argv=None):
     from lanrf.cli import cli_main as cli_entry
 
     return cli_entry(argv if argv is not None else sys.argv[1:])
+
+
+def daemon_client_status(timeout_ms=1500):
+    """Whether a root daemon is reachable over D-Bus (used by the GUI).
+
+    Never raises: absence of D-Bus, or of the daemon, is a normal state that
+    simply means repairs will need an authorization prompt.
+    """
+    try:
+        from lanrf import dbus as dbus_module
+
+        client = dbus_module.DaemonClient(timeout_ms=timeout_ms)
+        if not client.usable:
+            return None
+        return {"running": client.is_running(), "error": client.last_error}
+    except Exception as exception:  # noqa: BLE001 - desktop integration
+        return {"running": False, "error": str(exception)}
