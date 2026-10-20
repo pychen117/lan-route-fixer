@@ -13,9 +13,13 @@ ExecStart=/usr/bin/lan-route-fixer daemon --quiet --interval 15 --dbus
 Restart=always
 RestartSec=2
 # Route and rule changes need CAP_NET_ADMIN; CAP_NET_RAW is kept for the
-# optional diagnostic probes. Everything else is dropped.
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+# optional diagnostic probes. CAP_DAC_READ_SEARCH is required to *read* the
+# config of every user: the daemon runs as root, but a bounded root without
+# this capability is just "other" for a 0750 home or a 0700 ~/.config and
+# cannot traverse into it (without it, discovery silently returns no configs).
+# Search/read bypass only: nothing here may write to /home.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH
 NoNewPrivileges=yes
 # The daemon must read every user's ~/.config, so /home stays readable but is
 # never written to: publishing state happens in /run (RuntimeDirectory).

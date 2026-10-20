@@ -9,8 +9,11 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/libexec/lan-route-fixer/lan-route-fixer-apply
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH
+# CAP_DAC_READ_SEARCH: read/search bypass so root can reach a user's
+# ~/.config/lan-route-fixer/config.json even when the home directory is
+# 0750/0700. Without it this fallback also reports checked=0.
 ProtectSystem=full
 ProtectHome=read-only
 Nice=5

@@ -1,3 +1,16 @@
+lan-route-fixer (2.2.1-1) unstable; urgency=medium
+
+  * Fix automatic repair never running for ordinary users: both systemd units
+    now grant CAP_DAC_READ_SEARCH. A root process with the previous bounding
+    set is "other" for a 0750 home directory and a 0700 ~/.config, so it could
+    not traverse into the user config: discovery returned no paths, the daemon
+    reported targets=0 (and the one-shot applier checked=0) while the GUI still
+    listed the targets. The event driven repair therefore did nothing until the
+    user repaired by hand after every VPN connect.
+  * Add tests/test_units.py to pin the capability set and to require
+    ProtectHome=read-only (never "yes", which would hide /home entirely).
+
+ -- pychen117 <pychen117@163.com>  Tue, 20 Oct 2026 15:58:26 +0800
 lan-route-fixer (2.2.0-1) unstable; urgency=medium
 
   * One window, no nested dialogs: the GTK4 interface is a single
