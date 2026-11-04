@@ -476,6 +476,9 @@ tools/gui-smoke                                 GTK 控件树冒烟测试（无�
 tools/gui-screenshot                            把每一页渲染成 PNG
 tools/plan-preview                              只读预览将要执行的 ip 命令
 tools/windows/pin-lan.ps1                       独立 PowerShell 工具（status/apply/remove/watch/install）
+tools/windows/fix-lan.cmd                       一键入口（自动请求管理员权限）
+tools/windows/entry.py                          PyInstaller 入口（打进单文件 exe）
+tools/windows/build-exe.cmd                     构建 Windows 单文件可执行程序
 tools/windows/probe_winapi.py                   只读探针（核对结构体尺寸与真实选路）
 tools/windows/README.md                         Windows 工具的使用说明
 tests/                                          单元测试（含假后端）
@@ -523,6 +526,24 @@ python -B src\usr\bin\lan-route-fixer doctor
 `tools/windows/pin-lan.ps1` 是不需要 Python 的等价实现
 （`status` / `apply` / `remove` / `watch` / `install`），用法见
 [tools/windows/README.md](tools/windows/README.md)。
+
+### 可执行文件（Release 附件）
+
+[GitHub Releases](https://github.com/pychen117/lan-route-fixer/releases) 里的
+`lan-route-fixer.exe` 是 PyInstaller 打包的单文件控制台程序，不需要装 Python：
+
+```powershell
+lan-route-fixer.exe status            # 只看，不需要管理员
+lan-route-fixer.exe import-ssh --dry-run
+lan-route-fixer.exe fix               # 管理员 PowerShell
+lan-route-fixer.exe run --interval 10 # 管理员：常驻轮询修复
+lan-route-fixer.exe doctor
+```
+
+自己构建：双击 `tools\windows\build-exe.cmd`（需要 Python 3.10+，脚本会按需装
+PyInstaller），产物在 `dist\windows\lan-route-fixer.exe`。onefile 版启动时会解压
+到 `%TEMP%`；如果那台机器的临时目录被安全策略锁死，把构建命令里的 `--onefile`
+换成 `--onedir`。
 
 ### 路径
 

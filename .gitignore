@@ -26,3 +26,8 @@ venv/
 /debian/*.postrm.debhelper
 /debian/*.postinst.debhelper
 /debian/*.prerm.debhelper
+
+# PyInstaller build output
+/build/
+/dist/
+*.spec

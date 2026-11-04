@@ -1,3 +1,15 @@
+lan-route-fixer (2.3.1-1) unstable; urgency=medium
+
+  * Ship a Windows executable. tools/windows/entry.py plus a PyInstaller
+    recipe (tools/windows/build-exe.cmd) freeze the whole CLI into a single
+    lan-route-fixer.exe, so status/fix/run/doctor work on Windows without a
+    Python installation; the build script is committed and the binary is
+    attached to the GitHub release instead of living in git.
+  * README: how to use the release executable, and the onefile %TEMP%
+    caveat.
+
+ -- pychen117 <pychen117@163.com>  Wed, 04 Nov 2026 14:32:00 +0800
+
 lan-route-fixer (2.3.0-1) unstable; urgency=medium
 
   * Windows support. The same reconcile/daemon/config layer now runs on
