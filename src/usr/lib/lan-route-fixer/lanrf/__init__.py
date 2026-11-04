@@ -8,12 +8,14 @@ Package layout
 ``config``      config file load/save plus daemon state publication
 ``backends``    backend protocol and platform selection
 ``linux``       Linux backend (``ip``, sysfs) and route/rule parsing
-``windows``     Windows backend skeleton (IP Helper API mapping)
+``winapi``      ctypes binding of the Windows IP Helper API
+``windows``     Windows backend (single routing table, /32 host routes)
 ``netlink``     rtnetlink event subscription used by the Linux backend
 ``routing``     interface selection policy
 ``reconcile``   the pure inspect/plan/apply engine
 ``checks``      read-only status for the CLI and the GUI
 ``discovery``   LAN neighbour discovery
+``sshconfig``   OpenSSH client config parser and physical-LAN filter
 ``cleanup``     garbage collection for routes/rules and stale targets
 ``privileged``  client side of the PolicyKit boundary
 ``helper``      inside of the trust boundary: validation + kernel mutations
@@ -39,9 +41,11 @@ __all__ = [
     "privileged",
     "reconcile",
     "routing",
+    "sshconfig",
     "system",
     "targets",
+    "winapi",
     "windows",
 ]
 
-__version__ = "2.2.1"
+__version__ = "2.3.0"

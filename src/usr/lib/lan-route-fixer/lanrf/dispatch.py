@@ -26,13 +26,14 @@ CLI_COMMANDS = frozenset(
         "disable",
         "set-interface",
         "config",
+        "import-ssh",
         "help",
     }
 )
 
 # Options that consume the following token as their value.
 VALUE_OPTIONS = frozenset({"--config", "--helper", "--interval", "--port", "--name",
-                           "--interface"})
+                           "--interface", "--ssh-config", "--only", "--name-prefix"})
 
 # Flags that mean "this is the CLI" even on their own.
 CLI_FLAGS = frozenset({"-h", "--help", "--version"})

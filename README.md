@@ -450,7 +450,9 @@ src/usr/lib/lan-route-fixer/lanrf/             可复用实现
     config.py       配置读写 + 状态发布 + 发现缓存路径
     backends.py     平台后端协议与选择
     linux.py        Linux 后端（ip / sysfs / 路由与规则解析）
-    windows.py      Windows 后端骨架（IP Helper API 映射）
+    windows.py      Windows 后端（iphlpapi / netioapi，ctypes）
+    winapi.py       Windows IP Helper API 的 ctypes 绑定与结构体
+    sshconfig.py    OpenSSH 客户端配置解析（import-ssh 用）
     netlink.py      rtnetlink 事件订阅
     routing.py      网卡选择策略
     reconcile.py    纯协调引擎（检查 → 计划 → 执行 → 复核）
@@ -473,49 +475,95 @@ tools/verify-namespace                          真实内核验证（无需 root
 tools/gui-smoke                                 GTK 控件树冒烟测试（无需人点击）
 tools/gui-screenshot                            把每一页渲染成 PNG
 tools/plan-preview                              只读预览将要执行的 ip 命令
+tools/windows/pin-lan.ps1                       独立 PowerShell 工具（status/apply/remove/watch/install）
+tools/windows/probe_winapi.py                   只读探针（核对结构体尺寸与真实选路）
+tools/windows/README.md                         Windows 工具的使用说明
 tests/                                          单元测试（含假后端）
 ```
 
-## 移植到 Windows（设计说明）
+## Windows
 
-代码从一开始就是按「同一套决策逻辑 + 可替换的平台后端」组织的，
-所以移植是**填空**，不是重写：
+Windows 上的失败模式和 Linux 一样，只是内核接口不同：aTrust 连上后，会把
+`10/8`、`172.16/12`、`192.168/16` 拆成 `/25`…`/32` 的 NetMgmt 路由塞进它的隧道
+网卡，metric 全是 0。Windows **只有一张路由表**，也没有 `ip rule`，所以这里不用
+策略路由，而是用「更长前缀」：
 
-- `lanrf/reconcile.py`、`routing.py`、`checks.py`、`targets.py`、`model.py`、
-  `doctor.py` **零平台依赖**，一行都不用改。
-- 平台差异全部收敛在 `lanrf/backends.py` 定义的 `NetworkBackend` 协议后面
-  （查询：`link_kind` / `is_usable` / `local_networks` / `default_interfaces` /
-  `route_lookup` / `routes` / `rules`；变更：`ensure_route` / `remove_route` /
-  `ensure_rule` / `remove_rule`）。
-- `lanrf/windows.py` 已经写好骨架与 API 映射表：
+- 给每台目标主机装一条 `/32` 主机路由，下一跳 `0.0.0.0`（on-link）、metric 0，
+  装在物理网卡上。aTrust 的 `/26`、`/25` 再快也赢不过更长前缀。
+- Windows 没有 rtnetlink 事件源（`NotifyRouteChange2` 还没有接入），守护进程
+  自动退回轮询（默认 10 秒）。aTrust 重连后，最迟一个轮询周期恢复。
+- 写路由表必须有管理员权限：未提权时 `fix` 直接报错，不会反复弹 UAC。
 
-  | Linux | Windows（iphlpapi / netioapi） |
-  | --- | --- |
-  | `ip route show` | `GetIpForwardTable2` + `FreeMibTable` |
-  | `ip route replace` | `CreateIpForwardEntry2` / `SetIpForwardEntry2` |
-  | `ip route del` | `DeleteIpForwardEntry2` |
-  | `ip route get` | `GetBestRoute2` |
-  | `/sys/class/net`、`ip -d link` | `GetIpInterfaceTable` + `ConvertInterfaceLuidToNameW` |
-  | `ip -o addr show` | `GetAdaptersAddresses` |
-  | rtnetlink socket | `NotifyRouteChange2` |
-  | `ip rule`（策略路由） | 无对应物，`supports_policy_rules = False` |
-  | pkexec / polkit | Windows 服务（LocalSystem）或计划任务提权 |
-  | D-Bus 系统总线 | 具名管道（`\\.\pipe\lan-route-fixer`）+ 服务 SID 上的 ACL |
+### 用法
 
-  两个需要注意的行为差异已经记录在 `lanrf/windows.py` 的模块注释里：
-  Windows 只有一张路由表（因此必须靠「更低 metric + 事件驱动即时修复」），
-  以及 `CreateIpForwardEntry2` 在条目已存在时返回
-  `ERROR_OBJECT_ALREADY_EXISTS`，需要回退到 `SetIpForwardEntry2`。
+只想马上修好、不装 Python？双击 `tools\windows\fix-lan.cmd` 即可（自动请求
+管理员权限，写完 `/32` 路由再显示状态）。它的 `status` / `apply` / `remove` /
+`watch` / `install` 子命令见 [tools/windows/README.md](tools/windows/README.md)。
 
-移植时需要新增的工作：实现 `WindowsBackend` 的十个方法、把
-`lanrf/privileged.py` 的 pkexec 调用与 `lanrf/dbus.py` 的总线调用换成
-具名管道（服务端跑在 LocalSystem，客户端把同样的 `Repair`/`GetStatus`
-请求写进去即可，`reconcile` 层不需要改动）、提供 Windows 下的后台安装方式
-（服务或计划任务）。其余（配置格式、CLI、诊断、协调策略）可以直接复用。
+用项目自带 CLI 的话：
 
-「反复弹授权」这个问题在 Windows 上同样存在（UAC），
-所以"由常驻服务代劳、客户端只发请求"这个结构是刻意保留的：
-它不依赖 PolicyKit，也不依赖 D-Bus 的具体实现。
+```powershell
+# 1) 不需要管理员：看每台主机现在到底走哪块网卡
+python -B src\usr\bin\lan-route-fixer status
+
+# 2) 从 OpenSSH 配置导入局域网主机（先预演，再写入）
+python -B src\usr\bin\lan-route-fixer import-ssh --dry-run
+python -B src\usr\bin\lan-route-fixer import-ssh --yes
+
+# 3) 管理员 PowerShell：真正写入 /32 主机路由
+python -B src\usr\bin\lan-route-fixer fix
+
+# 4) 常驻：轮询修复（管理员），或只在前台观察
+python -B src\usr\bin\lan-route-fixer run --interval 10
+
+# 5) 诊断
+python -B src\usr\bin\lan-route-fixer doctor
+```
+
+`tools/windows/pin-lan.ps1` 是不需要 Python 的等价实现
+（`status` / `apply` / `remove` / `watch` / `install`），用法见
+[tools/windows/README.md](tools/windows/README.md)。
+
+### 路径
+
+| 内容 | Windows 路径 |
+| --- | --- |
+| 用户配置 | `%APPDATA%\lan-route-fixer\config.json` |
+| 系统配置 | `%PROGRAMDATA%\lan-route-fixer\config.json`（`LAN_ROUTE_FIXER_SYSTEM_CONFIG` 可覆盖） |
+| 状态 | `%LOCALAPPDATA%\lan-route-fixer\state.json`（`LAN_ROUTE_FIXER_STATE` 可覆盖） |
+
+`routing_mode` 在 Windows 上应保持 `main`；填 `rule` 时后端会说明这里只有一张
+路由表，`ensure_rule` / `remove_rule` 会抛出 `NotImplementedError`。
+
+### 实现映射
+
+| Linux | Windows（iphlpapi / netioapi） |
+| --- | --- |
+| `ip route show` | `GetIpForwardTable2` + `FreeMibTable` |
+| `ip route replace` | `CreateIpForwardEntry2`，条目已存在时回退 `SetIpForwardEntry2` |
+| `ip route del` | `DeleteIpForwardEntry2` |
+| `ip route get` | `GetBestRoute2` |
+| `/sys/class/net`、`ip -d link` | `GetAdaptersAddresses`（ifIndex + FriendlyName + IfType/OperStatus） |
+| `ip -o addr show` | `GetAdaptersAddresses` 的地址链表 / `GetUnicastIpAddressTable` |
+| rtnetlink socket | `NotifyRouteChange2`（尚未接入，改用轮询） |
+| `ip rule`（策略路由） | 无对应物，`supports_policy_rules = False` |
+| pkexec / polkit | 管理员 PowerShell / UAC（没有 LocalSystem 服务与具名管道） |
+| D-Bus 系统总线 | 尚未移植；GUI 与 D-Bus 守护仍要求 Linux |
+
+两个踩过的坑已经写进 `lanrf/winapi.py` 的断言里：
+
+- `SOCKADDR_INET` 是 union，成员里有 `ULONG`，对齐是 **4** 而不是 2。把它写成
+  `(c_ushort, c_ubyte*26)` 会让 `IP_ADDRESS_PREFIX` 变成 30 字节而不是 32，之后
+  每个字段都错 2 字节（metric 读成 3600、NextHop 的 family 读成 0、LUID 是垃圾）。
+- `GetIpForwardTable2` 返回的缓冲区前面有一个 `ULONG NumEntries`，行数据从
+  `ptr+8` 开始，`MIB_IPFORWARD_ROW2` 必须是 104 字节。
+
+### 还没做的
+
+`NotifyRouteChange2` 事件源、LocalSystem 服务 + 具名管道（现在的后台方式只有
+「管理员前台 `run`」和「登录计划任务」）、Windows 安装包、GUI。`prune` 依赖
+`owned` 启发式（主机路由 + metric 0 + on-link），因为 Windows 的路由行没有地方
+写 `proto 66`。
 
 ## 开发
 
@@ -523,9 +571,15 @@ tests/                                          单元测试（含假后端）
 # 跑测试
 python3 -m unittest discover -s tests -t .
 
-# 不装到系统也能跑源码树
-export LAN_ROUTE_FIXER_LIB=$PWD/src/usr/lib/lan-route-fixer
+# 不装到系统也能跑源码树（入口会自动找同目录的 ../lib/lan-route-fixer，
+# 所以 Windows 上也不必先设 LAN_ROUTE_FIXER_LIB）
 python3 src/usr/bin/lan-route-fixer doctor
+
+# Windows：解释器用 python -B（防止在仓库里写 __pycache__），
+# 且本机没有可写临时目录时，测试会卡在 tests/__init__.py 的 tempfile.mkdtemp；
+# 给一个可写目录即可：
+set TMPDIR=%USERPROFILE%\AppData\Local\Temp
+python -B -m unittest discover -s tests -t .
 ```
 
 便于测试的环境变量：`LAN_ROUTE_FIXER_LIB`、`LAN_ROUTE_FIXER_HELPER`、

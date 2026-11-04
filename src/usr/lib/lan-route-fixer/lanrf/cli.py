@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import time
+import unicodedata
 
 from .backends import get_backend
 from .checks import check_targets, summarize
@@ -103,6 +104,62 @@ def _helper_outcome_message(outcome):
     return describe_failure(return_code, outcome.get("stderr", ""))
 
 
+def _admin_hint(command):
+    """Platform-appropriate wording for "this needs privileges"."""
+    if os.name == "nt":
+        return f"需要管理员权限：请以管理员身份打开 PowerShell 后运行 {command}"
+    return f"需要管理员权限：sudo {command}"
+
+
+def _print_repair_needs_elevation(daemon, report):
+    """Explain a not-ok one-shot reconcile when the process cannot mutate."""
+    backend = getattr(daemon, "backend", None)
+    if backend is None or getattr(backend, "is_privileged", True):
+        return
+    pending = [
+        snapshot.get("name") or snapshot.get("address", "")
+        for snapshot in report.get("snapshots", [])
+        if not snapshot.get("ok")
+    ]
+    if not pending:
+        return
+    print(
+        f"{len(pending)} 个目标仍被其他网卡接管（{', '.join(pending)}）；"
+        + _admin_hint("lan-route-fixer fix"),
+        file=sys.stderr,
+    )
+
+
+def _display_width(text):
+    """Terminal cell width, counting wide CJK characters as two columns."""
+    width = 0
+    for character in str(text):
+        width += 2 if unicodedata.east_asian_width(character) in "WF" else 1
+    return width
+
+
+def _pad(text, width):
+    text = str(text)
+    return text + " " * max(0, width - _display_width(text))
+
+
+def _print_table(headers, rows):
+    """Print a left-aligned table that stays aligned with CJK names."""
+    widths = []
+    for index, header in enumerate(headers):
+        cells = [str(row[index]) for row in rows]
+        widths.append(
+            max([_display_width(header)] + [_display_width(cell) for cell in cells])
+        )
+    print("  ".join(_pad(header, width) for header, width in zip(headers, widths)).rstrip())
+    for row in rows:
+        print(
+            "  ".join(
+                _pad(str(cell), width) for cell, width in zip(row, widths)
+            ).rstrip()
+        )
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="lan-route-fixer",
@@ -183,6 +240,45 @@ def build_parser():
 
     remove = subparsers.add_parser("remove", help="remove a target by address or name")
     remove.add_argument("query", help="address or name")
+
+    import_ssh = subparsers.add_parser(
+        "import-ssh",
+        help="import LAN hosts from the OpenSSH client config",
+    )
+    import_ssh.add_argument(
+        "--ssh-config",
+        metavar="PATH",
+        action="append",
+        help="SSH config file to read (default ~/.ssh/config; repeatable)",
+    )
+    import_ssh.add_argument(
+        "--only",
+        metavar="NAME",
+        action="append",
+        help="import only this host alias (repeatable)",
+    )
+    import_ssh.add_argument(
+        "--all",
+        action="store_true",
+        help="import every concrete host, ignoring --only",
+    )
+    import_ssh.add_argument(
+        "--dry-run", action="store_true", help="show what would be added, change nothing"
+    )
+    import_ssh.add_argument(
+        "--include-tunnel",
+        action="store_true",
+        help="also import hosts whose route leaves through a tunnel",
+    )
+    import_ssh.add_argument(
+        "--interface", help="physical interface to pin the imported hosts to"
+    )
+    import_ssh.add_argument(
+        "--name-prefix", default="", help="prefix added to imported target names"
+    )
+    import_ssh.add_argument(
+        "--yes", action="store_true", help="do not ask before writing the config"
+    )
 
     enable = subparsers.add_parser("enable", help="enable a target")
     enable.add_argument("query", help="address or name")
@@ -268,7 +364,9 @@ def cli_main(argv):
             report = daemon.run_once()
             if args.json:
                 print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
-            return 0 if report.get("failed", 0) == 0 else 1
+            if not report.get("ok"):
+                _print_repair_needs_elevation(daemon, report)
+            return 0 if report.get("failed", 0) == 0 and report.get("bad", 0) == 0 else 1
         if args.dbus:
             try:
                 return daemon.run_glib()
@@ -277,6 +375,9 @@ def cli_main(argv):
         return daemon.run()
 
     config = _load(args.config)
+
+    if args.command == "import-ssh":
+        return _handle_import_ssh(args, config)
 
     if args.command == "check":
         return _print_check_results(check_targets(config), json_output=args.json)
@@ -313,6 +414,8 @@ def cli_main(argv):
             via = (
                 "后台守护进程（无需授权）"
                 if outcome.get("method") == "daemon"
+                else "管理员权限"
+                if outcome.get("method") == "windows-direct"
                 else "特权 helper"
             )
             print(f"修复完成，共 {len(outcome['items'])} 条路由（经由{via}）")
@@ -333,6 +436,8 @@ def cli_main(argv):
         )
         if args.once:
             report = daemon.run_once()
+            if not report.get("ok"):
+                _print_repair_needs_elevation(daemon, report)
             return 0 if report.get("failed", 0) == 0 and report.get("bad", 0) == 0 else 1
         return daemon.run()
 
@@ -356,7 +461,8 @@ def _handle_prune(args):
     # Without an explicit --config an unprivileged run only edits the caller's
     # own file (route ownership is a separate, wider keep-set; see keep_configs).
     allowed_paths = None
-    if os.geteuid() != 0:
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is None or geteuid() != 0:
         allowed_paths = {str(CONFIG_PATH)}
         if paths:
             allowed_paths.update(str(path) for path in paths)
@@ -384,7 +490,7 @@ def _handle_prune(args):
                 for failure in outcome["failed"]:
                     print(f"    ! {failure}")
         elif not args.json:
-            print("  （删除路由与规则需要管理员权限：sudo lan-route-fixer prune --yes）")
+            print(f"  （删除路由与规则{_admin_hint('lan-route-fixer prune --yes')}）")
 
     if do_targets:
         for entry in report["targets"]:
@@ -433,8 +539,8 @@ def _handle_prune(args):
     if failures:
         if not args.json:
             print(
-                "有项目没有删掉：删除路由与规则需要管理员权限，请用 "
-                "sudo lan-route-fixer prune --yes 重试。",
+                "有项目没有删掉：" + _admin_hint("lan-route-fixer prune --yes")
+                + "，然后重试。",
                 file=sys.stderr,
             )
         return 1
@@ -591,6 +697,145 @@ def _handle_mutation(args, config):
         print("无法保存配置", file=sys.stderr)
         return 1
     print(f"已处理 {len(indices)} 个目标：{args.command} {args.query}")
+    return 0
+
+
+def _handle_import_ssh(args, config):
+    """Import hosts from an OpenSSH config, keeping only physical-LAN targets."""
+    from .sshconfig import (
+        default_ssh_config_paths,
+        filter_by_backend,
+        host_to_target,
+        parse_ssh_config,
+    )
+    from .targets import normalize_interface_arg
+
+    backend = get_backend()
+    interface = normalize_interface_arg(args.interface)
+    error = _interface_choice_error(backend, interface)
+    if error:
+        print(error, file=sys.stderr)
+        return 1
+
+    configured_paths = args.ssh_config or [
+        str(path) for path in default_ssh_config_paths()
+    ]
+    ssh_paths = [os.path.expanduser(str(path)) for path in configured_paths]
+    existing_paths = [path for path in ssh_paths if os.path.isfile(path)]
+    if not existing_paths:
+        print(f"找不到 SSH 配置：{', '.join(ssh_paths)}", file=sys.stderr)
+        return 1
+    for path in ssh_paths:
+        if path not in existing_paths:
+            print(f"警告：跳过不存在的 SSH 配置 {path}", file=sys.stderr)
+
+    hosts = parse_ssh_config(existing_paths)
+    if args.only and not args.all:
+        wanted = {str(name).strip().lower() for name in args.only}
+        known = {host.name.lower() for host in hosts}
+        for name in args.only:
+            if str(name).strip().lower() not in known:
+                print(f"SSH 配置中没有主机：{name}", file=sys.stderr)
+        hosts = [host for host in hosts if host.name.lower() in wanted]
+    if not hosts:
+        print("SSH 配置中没有可导入的具体主机（通配符与 Match 块会被忽略）")
+        return 0
+
+    candidates = [
+        host_to_target(host, interface=interface, name_prefix=args.name_prefix or "")
+        for host in hosts
+    ]
+    kept, skipped = filter_by_backend(
+        candidates, backend, include_tunnel=args.include_tunnel
+    )
+
+    existing_addresses = {
+        str(target.get("address", "")).strip() for target in config.targets
+    }
+    additions = []
+    new_addresses = set()
+    for target in kept:
+        address = str(target.get("address", "")).strip()
+        if address in existing_addresses or address in new_addresses:
+            continue
+        new_addresses.add(address)
+        additions.append(target)
+    skipped_existing = len(kept) - len(additions)
+
+    hosts_by_address = {}
+    for host in hosts:
+        hosts_by_address.setdefault(host.address, host)
+
+    if kept:
+        print(f"可在物理局域网直连的主机（{len(kept)} 个）：")
+        rows = []
+        for target in kept:
+            host = hosts_by_address.get(target["address"])
+            rows.append(
+                [
+                    target.get("name", ""),
+                    target.get("address", ""),
+                    str(host.port) if host else "",
+                    (host.user or "-") if host else "-",
+                    target.get("interface") or "自动",
+                ]
+            )
+        _print_table(["名称", "地址", "端口", "用户", "网卡"], rows)
+    else:
+        print("没有可在物理局域网直连的主机")
+
+    if skipped:
+        print()
+        print(f"已跳过 {len(skipped)} 个主机：")
+        _print_table(
+            ["名称", "地址", "原因"],
+            [[entry["name"], entry["address"], entry["reason"]] for entry in skipped],
+        )
+
+    print()
+    if args.dry_run:
+        if not additions:
+            print(f"预演：没有需要添加的目标（{skipped_existing} 个已存在或重复）")
+        else:
+            print(f"预演：将添加 {len(additions)} 个目标（未写入配置）：")
+            _print_table(
+                ["名称", "地址", "网卡"],
+                [
+                    [
+                        target.get("name", ""),
+                        target.get("address", ""),
+                        target.get("interface") or "自动",
+                    ]
+                    for target in additions
+                ],
+            )
+            if skipped_existing:
+                print(f"另有 {skipped_existing} 个目标已在配置中，保持不动")
+        return 0
+
+    if not additions:
+        print("没有需要添加的目标（均在配置中或不在物理局域网）")
+        return 0
+
+    if not args.yes:
+        if getattr(sys.stdin, "isatty", lambda: False)():
+            print(
+                f"将添加 {len(additions)} 个目标到 {config.path}，继续？[y/N] ",
+                end="",
+                flush=True,
+            )
+            answer = sys.stdin.readline().strip().lower()
+            if answer not in {"y", "yes", "是"}:
+                print("已取消，未修改配置")
+                return 1
+        else:
+            print("非交互式运行：直接写入配置（等同于 --yes）")
+
+    config.targets.extend(additions)
+    if not config.save():
+        print(f"无法保存配置：{config.path}", file=sys.stderr)
+        return 1
+    print(f"已添加 {len(additions)} 个目标到 {config.path}")
     return 0
 
 

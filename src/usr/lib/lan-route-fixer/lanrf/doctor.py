@@ -16,7 +16,7 @@ import socket
 import subprocess
 import time
 
-from . import model, netlink
+from . import model
 from .backends import get_backend
 from .config import CONFIG_PATH, SYSTEM_CONFIG_PATH, read_state
 from .privileged import helper_status
@@ -39,6 +39,57 @@ def _finding(severity, title, detail="", hint=""):
     return {"severity": severity, "title": title, "detail": detail, "hint": hint}
 
 
+def _windows_environment(backend):
+    """Windows-specific findings: elevation, tunnel adapters, aTrust presence."""
+    findings = []
+    privileged = bool(getattr(backend, "is_privileged", False))
+    findings.append(
+        _finding(
+            SEVERITY_OK if privileged else SEVERITY_WARN,
+            "管理员权限：" + ("已提权" if privileged else "未提权"),
+            "当前进程可以写路由表"
+            if privileged
+            else "只读：Windows 没有 pkexec，写路由表必须由 UAC 提权的进程完成",
+            ""
+            if privileged
+            else "以「管理员身份」打开 PowerShell 后运行 fix，或执行 "
+            "tools\\windows\\pin-lan.ps1 -Action install 注册登录计划任务",
+        )
+    )
+    provider = getattr(backend, "tunnel_interfaces", None)
+    tunnels = provider() if callable(provider) else []
+    names = []
+    for item in tunnels or []:
+        name = item.get("name") if isinstance(item, dict) else str(item)
+        if name:
+            names.append(name)
+    vpn = [
+        name
+        for name in names
+        if any(token in name.lower() for token in ("atrust", "sangfor", "easyconnect"))
+    ]
+    if vpn:
+        findings.append(
+            _finding(
+                SEVERITY_INFO,
+                "检测到 aTrust/Sangfor 隧道网卡",
+                ", ".join(vpn),
+                "aTrust 连接时用 NetMgmt + metric 0 的碎片路由抢占内网；"
+                "本工具用 /32 主机路由（最长前缀优先）把它盖回去",
+            )
+        )
+    if names:
+        findings.append(
+            _finding(
+                SEVERITY_INFO,
+                "检测到隧道/虚拟网卡",
+                ", ".join(names),
+                "这些网卡是 VPN 抢路由的来源，本工具不会把目标钉在它们上面",
+            )
+        )
+    return findings
+
+
 def diagnose_environment(backend=None):
     """Backend, kernel and packaging facts."""
     backend = backend or get_backend()
@@ -50,15 +101,25 @@ def diagnose_environment(backend=None):
             f"{platform.system()} {platform.release()} · Python {platform.python_version()}",
         )
     )
-    findings.append(
-        _finding(
-            SEVERITY_OK if backend.supports_events else SEVERITY_WARN,
-            "内核路由事件通知：" + ("可用" if backend.supports_events else "不可用"),
-            "RTM_NEWROUTE/RTM_DELROUTE 订阅；实测把修复延迟从最长 30s 降到约 0.33s"
-            if backend.supports_events
-            else "将退化为轮询，修复存在最长一个轮询周期的窗口",
+    if backend.name == "windows":
+        findings.append(
+            _finding(
+                SEVERITY_INFO,
+                "内核路由事件通知：不适用",
+                "Windows 没有 rtnetlink；NotifyRouteChange2 事件源尚未实现，改用轮询",
+                "登录计划任务或常驻守护进程把修复窗口压到一个轮询周期",
+            )
         )
-    )
+    else:
+        findings.append(
+            _finding(
+                SEVERITY_OK if backend.supports_events else SEVERITY_WARN,
+                "内核路由事件通知：" + ("可用" if backend.supports_events else "不可用"),
+                "RTM_NEWROUTE/RTM_DELROUTE 订阅；实测把修复延迟从最长 30s 降到约 0.33s"
+                if backend.supports_events
+                else "将退化为轮询，修复存在最长一个轮询周期的窗口",
+            )
+        )
     findings.append(
         _finding(
             SEVERITY_OK if backend.supports_policy_rules else SEVERITY_INFO,
@@ -69,7 +130,9 @@ def diagnose_environment(backend=None):
         )
     )
     status = helper_status()
-    if status["helper_exists"]:
+    if backend.name == "windows":
+        findings.extend(_windows_environment(backend))
+    elif status["helper_exists"]:
         findings.append(
             _finding(
                 SEVERITY_OK,
@@ -86,13 +149,14 @@ def diagnose_environment(backend=None):
                 "重新安装 lan-route-fixer 软件包",
             )
         )
-    findings.append(
-        _finding(
-            SEVERITY_OK if status["pkexec_exists"] else SEVERITY_WARN,
-            "pkexec：" + ("已安装" if status["pkexec_exists"] else "缺失"),
-            status["pkexec_path"],
+    if backend.name != "windows":
+        findings.append(
+            _finding(
+                SEVERITY_OK if status["pkexec_exists"] else SEVERITY_WARN,
+                "pkexec：" + ("已安装" if status["pkexec_exists"] else "缺失"),
+                status["pkexec_path"],
+            )
         )
-    )
     interfaces = backend.list_interfaces(only_up=True)
     findings.append(
         _finding(
@@ -278,7 +342,12 @@ def diagnose_background(backend):
                 "后台守护进程状态文件" + ("（新鲜）" if fresh else "（已过期）"),
                 f"{state.get('_path')} · {age:.0f}s 前 · reason={state.get('reason')} "
                 f"· 模式={state.get('routing_mode')} · 修复={state.get('changed')}",
-                "" if fresh else "守护进程可能未运行：systemctl status lan-route-fixer-daemon.service",
+                "" if fresh else (
+                    "守护进程可能未运行：检查登录计划任务 LanRouteFixer，"
+                    "或重新运行 lan-route-fixer run"
+                    if backend.name == "windows"
+                    else "守护进程可能未运行：systemctl status lan-route-fixer-daemon.service"
+                ),
             )
         )
     else:
@@ -287,13 +356,39 @@ def diagnose_background(backend):
                 SEVERITY_WARN,
                 "没有后台守护进程状态",
                 "未找到 state.json",
-                "启用 `systemctl enable --now lan-route-fixer-daemon.service`，"
+                "以管理员身份运行 `lan-route-fixer run --interval 10`，"
+                "或执行 tools\\windows\\pin-lan.ps1 -Action install 注册登录计划任务，"
+                "否则路由只能靠手动 fix"
+                if backend.name == "windows"
+                else "启用 `systemctl enable --now lan-route-fixer-daemon.service`，"
                 "否则路由只能靠用户手动修复或 30 秒级的 timer",
             )
         )
 
     timer_active = _systemctl("is-active", "lan-route-fixer.timer")
     daemon_active = _systemctl("is-active", "lan-route-fixer-daemon.service")
+    if backend.name == "windows":
+        task = _scheduled_task_exists("LanRouteFixer")
+        if task:
+            findings.append(
+                _finding(
+                    SEVERITY_OK,
+                    "登录计划任务 LanRouteFixer 已注册",
+                    "登录后自动运行 watch，周期性把被抢走的主机路由补回去",
+                )
+            )
+        else:
+            findings.append(
+                _finding(
+                    SEVERITY_WARN,
+                    "没有登录计划任务",
+                    "LanRouteFixer 未注册（或查询需要权限）",
+                    "管理员 PowerShell 中执行 "
+                    "tools\\windows\\pin-lan.ps1 -Action install；"
+                    "或前台运行 lan-route-fixer run --interval 10",
+                )
+            )
+        return findings
     if timer_active:
         findings.append(
             _finding(
@@ -321,6 +416,23 @@ def diagnose_background(backend):
             )
         )
     return findings
+
+
+def _scheduled_task_exists(name):
+    """Whether a Windows scheduled task with *name* is registered."""
+    schtasks = shutil.which("schtasks")
+    if not schtasks:
+        return False
+    try:
+        result = subprocess.run(
+            [schtasks, "/Query", "/TN", name],
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
 
 def _systemctl(*args):
@@ -362,7 +474,7 @@ def diagnose(probe=True, port=22, config_paths=None):
             "user_exists": os.path.isfile(CONFIG_PATH),
             "system_exists": os.path.isfile(SYSTEM_CONFIG_PATH),
         },
-        "events": netlink.available(),
+        "events": bool(getattr(backend, "supports_events", False)),
     }
 
 

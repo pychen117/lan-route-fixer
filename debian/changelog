@@ -1,3 +1,35 @@
+lan-route-fixer (2.3.0-1) unstable; urgency=medium
+
+  * Windows support. The same reconcile/daemon/config layer now runs on
+    Windows through a real backend (lanrf/winapi.py, lanrf/windows.py) built
+    on the IP Helper API instead of `ip`/rtnetlink: GetIpForwardTable2,
+    CreateIpForwardEntry2 (with the SetIpForwardEntry2 fallback when the row
+    already exists), DeleteIpForwardEntry2, GetBestRoute2 and
+    GetAdaptersAddresses. Windows has one routing table and no `ip rule`, so
+    a target is kept on its physical adapter with a /32 on-link host route
+    (metric 0) that outranks aTrust's /25../26 fragments by longest prefix.
+  * New `import-ssh` command and lanrf/sshconfig.py: parse the OpenSSH client
+    config (Host/HostName/Port/User/Include, first match wins) and add only
+    the hosts that live inside a physical adapter's subnet, skipping tunnel
+    addresses with a reason that names the route that currently wins.
+  * Elevation on Windows is Administrator/UAC rather than PolicyKit: `fix`
+    mutates the table in-process when elevated and otherwise reports a clear
+    error. The daemon falls back to polling because NotifyRouteChange2 is not
+    wired up yet.
+  * Windows paths: %APPDATA%\lan-route-fixer\config.json,
+    %PROGRAMDATA%\lan-route-fixer\config.json and
+    %LOCALAPPDATA%\lan-route-fixer\state.json. CLI output is forced to UTF-8
+    so the check marks no longer raise UnicodeEncodeError under the GBK code
+    page, and the geteuid checks are guarded off non-POSIX platforms.
+  * tools/windows/: pin-lan.ps1 (standalone status/apply/remove/watch/install
+    tool, PowerShell 5.1+), fix-lan.cmd one-click wrapper, probe_winapi.py
+    read-only ctypes probe and a README explaining the mechanism.
+  * cleanup: the `owned` heuristic now also requires a physical adapter, so a
+    VPN client's own /32 host routes (for example Tailscale's) are no longer
+    listed as prunable.
+
+ -- pychen117 <pychen117@163.com>  Wed, 04 Nov 2026 14:20:00 +0800
+
 lan-route-fixer (2.2.1-1) unstable; urgency=medium
 
   * Fix automatic repair never running for ordinary users: both systemd units

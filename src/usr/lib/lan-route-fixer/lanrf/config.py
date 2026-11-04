@@ -16,25 +16,85 @@ APP_ID = "io.github.pychen117.LanRouteFixer"
 APP_DISPLAY_NAME = "局域网路由修复"
 APP_DESCRIPTION = "让所选局域网设备绕过 VPN 隧道，保持直连"
 
-CONFIG_HOME = Path(
-    os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
-).expanduser()
-CONFIG_PATH = CONFIG_HOME / "lan-route-fixer/config.json"
-AUTOSTART_PATH = CONFIG_HOME / "autostart/lan-route-fixer.desktop"
-SYSTEM_CONFIG_PATH = Path(
-    os.environ.get("LAN_ROUTE_FIXER_SYSTEM_CONFIG", "/etc/lan-route-fixer/config.json")
-)
+IS_WINDOWS = os.name == "nt"
+
+
+def windows_paths(appdata=None, localappdata=None, programdata=None):
+    """Return the Windows path layout as plain ``Path`` objects.
+
+    Deliberately pure (no registry, no environment probing unless an argument
+    is omitted) so the Windows branch can be tested on any host.  Windows has
+    no ``/etc`` or ``/run``: the machine-wide config lives under
+    ``%PROGRAMDATA%`` and the state file under ``%LOCALAPPDATA%``, which is
+    already per-user writable.  The fallback state path therefore points at the
+    same file (kept because :func:`read_state` still consults two locations).
+    """
+    appdata = Path(
+        appdata or os.environ.get("APPDATA") or (Path.home() / "AppData/Roaming")
+    )
+    localappdata = Path(
+        localappdata
+        or os.environ.get("LOCALAPPDATA")
+        or (Path.home() / "AppData/Local")
+    )
+    programdata = Path(
+        programdata or os.environ.get("PROGRAMDATA") or "C:/ProgramData"
+    )
+    config_home = appdata / "lan-route-fixer"
+    state_path = localappdata / "lan-route-fixer/state.json"
+    return {
+        "config_home": config_home,
+        "config_path": config_home / "config.json",
+        "autostart_path": config_home / "autostart/lan-route-fixer.desktop",
+        "system_config_path": programdata / "lan-route-fixer/config.json",
+        "discovery_cache_path": config_home / "discovered.json",
+        "state_path": state_path,
+        "fallback_state_path": state_path,
+    }
+
+
+if IS_WINDOWS:
+    _WINDOWS_PATHS = windows_paths()
+    CONFIG_HOME = _WINDOWS_PATHS["config_home"]
+    CONFIG_PATH = _WINDOWS_PATHS["config_path"]
+    AUTOSTART_PATH = _WINDOWS_PATHS["autostart_path"]
+    SYSTEM_CONFIG_PATH = Path(
+        os.environ.get("LAN_ROUTE_FIXER_SYSTEM_CONFIG")
+        or _WINDOWS_PATHS["system_config_path"]
+    )
+    # Where discovery records when each address was last seen, so targets that
+    # have vanished from the LAN can be offered for cleanup (see lanrf.cleanup).
+    DISCOVERY_CACHE_PATH = _WINDOWS_PATHS["discovery_cache_path"]
+    # State written by the daemon and read by unprivileged clients.  Windows has
+    # no /run; the per-user local app data directory is the equivalent.  The
+    # explicit env override keeps the test suite hermetic on every platform.
+    STATE_PATH = Path(
+        os.environ.get("LAN_ROUTE_FIXER_STATE")
+        or _WINDOWS_PATHS["state_path"]
+    )
+    FALLBACK_STATE_PATH = Path(
+        os.environ.get("LAN_ROUTE_FIXER_STATE")
+        or _WINDOWS_PATHS["fallback_state_path"]
+    )
+else:
+    CONFIG_HOME = Path(
+        os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
+    ).expanduser()
+    CONFIG_PATH = CONFIG_HOME / "lan-route-fixer/config.json"
+    AUTOSTART_PATH = CONFIG_HOME / "autostart/lan-route-fixer.desktop"
+    SYSTEM_CONFIG_PATH = Path(
+        os.environ.get("LAN_ROUTE_FIXER_SYSTEM_CONFIG", "/etc/lan-route-fixer/config.json")
+    )
+    # Where discovery records when each address was last seen, so targets that
+    # have vanished from the LAN can be offered for cleanup (see lanrf.cleanup).
+    DISCOVERY_CACHE_PATH = CONFIG_HOME / "lan-route-fixer/discovered.json"
+    # State written by the root daemon and read by unprivileged clients.
+    STATE_PATH = Path(
+        os.environ.get("LAN_ROUTE_FIXER_STATE", "/run/lan-route-fixer/state.json")
+    )
+    FALLBACK_STATE_PATH = CONFIG_HOME / "lan-route-fixer/state.json"
+
 SYSTEM_CONFIG_DIR = SYSTEM_CONFIG_PATH.parent
-
-# Where discovery records when each address was last seen, so targets that have
-# vanished from the LAN can be offered for cleanup (see lanrf.cleanup).
-DISCOVERY_CACHE_PATH = CONFIG_HOME / "lan-route-fixer/discovered.json"
-
-# State written by the root daemon and read by unprivileged clients.
-STATE_PATH = Path(
-    os.environ.get("LAN_ROUTE_FIXER_STATE", "/run/lan-route-fixer/state.json")
-)
-FALLBACK_STATE_PATH = CONFIG_HOME / "lan-route-fixer/state.json"
 
 DEFAULT_CONFIG = {
     "targets": [],
@@ -233,26 +293,35 @@ def collect_config_paths(extra_paths=()):
         import pwd
     except ImportError:  # pragma: no cover - Windows
         pwd = None
-    if pwd is not None:
-        try:
-            current_uid = os.geteuid()
-        except AttributeError:  # pragma: no cover - non-POSIX
-            current_uid = 0
-        for entry in pwd.getpwall():
-            if 0 < entry.pw_uid < 1000:
-                continue
-            if current_uid != 0 and entry.pw_uid != current_uid:
-                continue
-            if entry.pw_uid == current_uid:
-                # The caller's own file is CONFIG_PATH, which honours
-                # XDG_CONFIG_HOME; the hardcoded ~/.config path would ignore it.
-                candidate = CONFIG_PATH
-            else:
-                candidate = Path(entry.pw_dir or "") / ".config/lan-route-fixer/config.json"
-            if str(candidate) == str(SYSTEM_CONFIG_PATH):
-                continue
-            if candidate.is_file() and candidate not in paths:
-                paths.append(candidate)
+    if pwd is None:
+        # No pwd database (Windows): there is exactly one caller-owned file,
+        # and no other user's profile is this tool's business.
+        if (
+            CONFIG_PATH.is_file()
+            and CONFIG_PATH not in paths
+            and str(CONFIG_PATH) != str(SYSTEM_CONFIG_PATH)
+        ):
+            paths.append(CONFIG_PATH)
+        return paths
+    try:
+        current_uid = os.geteuid()
+    except AttributeError:  # pragma: no cover - non-POSIX
+        current_uid = 0
+    for entry in pwd.getpwall():
+        if 0 < entry.pw_uid < 1000:
+            continue
+        if current_uid != 0 and entry.pw_uid != current_uid:
+            continue
+        if entry.pw_uid == current_uid:
+            # The caller's own file is CONFIG_PATH, which honours
+            # XDG_CONFIG_HOME; the hardcoded ~/.config path would ignore it.
+            candidate = CONFIG_PATH
+        else:
+            candidate = Path(entry.pw_dir or "") / ".config/lan-route-fixer/config.json"
+        if str(candidate) == str(SYSTEM_CONFIG_PATH):
+            continue
+        if candidate.is_file() and candidate not in paths:
+            paths.append(candidate)
     return paths
 
 

@@ -11,7 +11,27 @@ import os
 import sys
 from pathlib import Path
 
-LIB_DIR = Path(os.environ.get("LAN_ROUTE_FIXER_LIB", "/usr/lib/lan-route-fixer"))
+def _default_lib_dir():
+    """The installed package directory, or the one beside this script.
+
+    A Debian install puts the package in ``/usr/lib/lan-route-fixer``.  In a
+    source checkout the package lives next to this script
+    (``src/usr/lib/lan-route-fixer``), so running
+    ``python src/usr/bin/lan-route-fixer`` works without setting
+    ``LAN_ROUTE_FIXER_LIB`` first — which matters on Windows, where there is no
+    ``/usr/lib``.
+    """
+    try:
+        here = Path(__file__).resolve().parent
+    except (NameError, OSError):  # pragma: no cover - embedded interpreters
+        return Path("/usr/lib/lan-route-fixer")
+    sibling = here.parent / "lib" / "lan-route-fixer"
+    if (sibling / "lanrf").is_dir():
+        return sibling
+    return Path("/usr/lib/lan-route-fixer")
+
+
+LIB_DIR = Path(os.environ.get("LAN_ROUTE_FIXER_LIB") or _default_lib_dir())
 if str(LIB_DIR) not in sys.path:
     sys.path.insert(0, str(LIB_DIR))
 

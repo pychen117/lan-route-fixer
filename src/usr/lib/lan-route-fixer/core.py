@@ -130,9 +130,39 @@ def _refresh_avahi_path():
 AVAHI_RESOLVE_PATH = _refresh_avahi_path()
 
 
+def _configure_stdio():
+    """Make the Windows console print the UTF-8 diagnostics.
+
+    The console code page defaults to the active ANSI code page (936 on a
+    Chinese system), so Python encodes stdout as GBK and the ``✓``/``✗``
+    severity symbols raise ``UnicodeEncodeError``. Switch the console to UTF-8
+    and the Python streams to UTF-8 with replacement, and leave POSIX alone.
+    """
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetConsoleOutputCP(65001)
+        kernel32.SetConsoleCP(65001)
+    except Exception:  # noqa: BLE001 - no console, or a frozen build
+        pass
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):  # pragma: no cover - closed stream
+            pass
+
+
 def cli_main(argv=None):
     from lanrf.cli import cli_main as cli_entry
 
+    _configure_stdio()
     return cli_entry(argv if argv is not None else sys.argv[1:])
 
 

@@ -242,8 +242,53 @@ def run_helper(items, use_pkexec=True, timeout=120, prefer_daemon=True):
     }
 
 
+def _fix_targets_windows(targets, backend=None, config=None):
+    """Fix targets directly in the current process on Windows.
+
+    Windows has no pkexec/PolicyKit helper: a route change either succeeds from
+    an elevated process (Administrator PowerShell) or fails with access denied.
+    The reconciler is therefore run in-process and its outcome is wrapped in the
+    same result dict :func:`run_helper` returns, so callers keep one shape.
+    """
+    backend = backend or get_backend()
+    if config is None:
+        from .config import load_config
+
+        config = load_config()
+    items = build_route_items(targets, backend=backend, config=config)
+    if not getattr(backend, "is_privileged", False):
+        return {
+            "return_code": EXIT_FAILED,
+            "stderr": (
+                "writing the Windows routing table requires an elevated "
+                "(Administrator) process; open PowerShell as Administrator"
+            ),
+            "stdout": "",
+            "items": items,
+            "method": "windows-direct",
+        }
+
+    from . import reconcile
+
+    outcome = reconcile.reconcile(targets, config, backend)
+    errors = outcome.get("errors") or []
+    return {
+        "return_code": EXIT_OK if outcome.get("ok") else EXIT_FAILED,
+        "stderr": "; ".join(str(error) for error in errors),
+        "stdout": json.dumps(outcome, ensure_ascii=False, default=str),
+        "items": items,
+        "method": "windows-direct",
+    }
+
+
 def fix_targets(targets, backend=None, config=None, use_pkexec=True, prefer_daemon=True):
-    """Fix targets from user context (prefers the daemon, falls back to pkexec)."""
+    """Fix targets from user context (prefers the daemon, falls back to pkexec).
+
+    On Windows there is no daemon/pkexec split: the backend mutates the routing
+    table directly when the process is elevated.
+    """
+    if sys.platform.startswith("win"):
+        return _fix_targets_windows(targets, backend, config)
     items = build_route_items(targets, backend=backend, config=config)
     return run_helper(items, use_pkexec=use_pkexec, prefer_daemon=prefer_daemon)
 
