@@ -52,6 +52,16 @@ def main(argv=None):
 
         return core.cli_main(argv)
 
+    # A bare ``lan-route-fixer`` in a terminal opens the TUI; the desktop
+    # launcher has no controlling terminal, so it still gets the GTK window.
+    if not argv:
+        force_gui = os.environ.get("LAN_ROUTE_FIXER_GUI") == "1"
+        no_tui = os.environ.get("LAN_ROUTE_FIXER_NO_TUI") == "1"
+        if not force_gui and not no_tui and sys.stdin.isatty() and sys.stdout.isatty():
+            from lanrf import tui
+
+            return tui.run()
+
     import app
 
     return app.main()

@@ -1,3 +1,21 @@
+lan-route-fixer (2.5.0-1) unstable; urgency=medium
+
+  * Add a full screen terminal dashboard: lanrf/tui.py (stdlib only, no
+    curses, so it also runs in the Windows terminal).  A bare
+    ``lan-route-fixer`` in an interactive terminal now opens it; the
+    desktop launcher keeps opening the GTK window because it has no tty.
+  * The dashboard shows the target cards with SECURED/CAPTURED/OFF badges,
+    the route-integrity radar, NIC/tunnel/aTrust/privilege/watchdog/route
+    counts and an event stream, and drives scan, fix, import-ssh, doctor,
+    watchdog installation and per-target details from the keyboard.
+  * ``lan-route-fixer tui [--interval N]`` opens it explicitly.
+  * Add tests/test_tui.py covering the pure renderer, text geometry,
+    ANSI serialisation, key handling and the disabled-target merge.
+  * Ship the dashboard inside the existing package (debian/install copies
+    the whole lanrf/ directory, so no packaging rules changed).
+
+ -- pychen117 <pychen117@163.com>  Wed, 04 Nov 2026 15:34:00 +0800
+
 lan-route-fixer (2.4.0-1) unstable; urgency=medium
 
   * Add a Windows GUI control deck: windows/gui.py (tkinter tech-styled

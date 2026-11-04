@@ -280,6 +280,17 @@ def build_parser():
         "--yes", action="store_true", help="do not ask before writing the config"
     )
 
+    tui = subparsers.add_parser(
+        "tui",
+        help="open the full-screen terminal dashboard (the console counterpart of the GUI)",
+    )
+    tui.add_argument(
+        "--interval",
+        type=float,
+        default=None,
+        help="seconds between automatic rescans (default 5)",
+    )
+
     enable = subparsers.add_parser("enable", help="enable a target")
     enable.add_argument("query", help="address or name")
 
@@ -307,6 +318,14 @@ def build_parser():
 def cli_main(argv):
     parser = build_parser()
     args = parser.parse_args(list(argv or []))
+
+    if args.command == "tui":
+        from . import tui as tui_module
+
+        return tui_module.run(
+            interval=getattr(args, "interval", None),
+            config_path=getattr(args, "config", None),
+        )
 
     if args.command == "scan":
         targets = detect_targets(resolve_names=not args.no_names)
@@ -366,6 +385,11 @@ def cli_main(argv):
                 print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
             if not report.get("ok"):
                 _print_repair_needs_elevation(daemon, report)
+            if args.dry_run:
+                # A dry run only reports; uninstalled routes are the expected
+                # state, not a failure.  Only an attempted-and-failed mutation
+                # is worth a non-zero exit code here.
+                return 0 if report.get("failed", 0) == 0 else 1
             return 0 if report.get("failed", 0) == 0 and report.get("bad", 0) == 0 else 1
         if args.dbus:
             try:

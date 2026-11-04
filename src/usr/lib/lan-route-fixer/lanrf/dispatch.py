@@ -27,6 +27,7 @@ CLI_COMMANDS = frozenset(
         "set-interface",
         "config",
         "import-ssh",
+        "tui",
         "help",
     }
 )

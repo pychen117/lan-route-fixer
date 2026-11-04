@@ -364,8 +364,14 @@ class DiscoveryCacheTests(unittest.TestCase):
         neighbour_output = (
             "192.168.4.19 dev wlp0s20f3 lladdr aa:bb:cc:dd:ee:ff REACHABLE\n"
         )
+        # The parser filters by "is this a real physical NIC?", which is what we
+        # want in production but cannot assume about the machine running the
+        # tests (a CI container has no wlp0s20f3 in /sys/class/net).
         with mock.patch.object(cleanup, "DISCOVERY_CACHE_PATH", self.path), \
-                mock.patch.object(discovery, "run_ip_ok", return_value=neighbour_output):
+                mock.patch.object(discovery, "run_ip_ok", return_value=neighbour_output), \
+                mock.patch("lanrf.linux.get_link_info",
+                           return_value={"wlp0s20f3": {"kind": "ether"}}), \
+                mock.patch("lanrf.linux.is_usable_interface", return_value=True):
             found = discovery.detect_targets(resolve_names=False)
         self.assertEqual([target["address"] for target in found], ["192.168.4.19"])
         self.assertIn("192.168.4.19", read_discovery_cache(self.path))
@@ -373,7 +379,10 @@ class DiscoveryCacheTests(unittest.TestCase):
         # record=False must leave the cache alone (used by read-only callers).
         self.path.unlink()
         with mock.patch.object(cleanup, "DISCOVERY_CACHE_PATH", self.path), \
-                mock.patch.object(discovery, "run_ip_ok", return_value=neighbour_output):
+                mock.patch.object(discovery, "run_ip_ok", return_value=neighbour_output), \
+                mock.patch("lanrf.linux.get_link_info",
+                           return_value={"wlp0s20f3": {"kind": "ether"}}), \
+                mock.patch("lanrf.linux.is_usable_interface", return_value=True):
             discovery.detect_targets(resolve_names=False, record=False)
         self.assertFalse(self.path.exists())
 

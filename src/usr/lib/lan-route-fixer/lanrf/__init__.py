@@ -21,6 +21,7 @@ Package layout
 ``helper``      inside of the trust boundary: validation + kernel mutations
 ``system``      multi-config reconciliation for root-owned background paths
 ``daemon``      event driven repair loop
+``tui``         full screen terminal dashboard (stdlib only)
 ``doctor``      diagnostics
 ``cli``         command line interface
 """
@@ -44,8 +45,9 @@ __all__ = [
     "sshconfig",
     "system",
     "targets",
+    "tui",
     "winapi",
     "windows",
 ]
 
-__version__ = "2.4.0"
+__version__ = "2.5.0"

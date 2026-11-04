@@ -171,12 +171,13 @@ lan-route-fixer prune --routes --days 7   # 只看路由残留，保留窗口临
 ```sh
 cd lan-route-fixer
 dpkg-buildpackage -us -uc -b
-sudo apt install ../lan-route-fixer_2.2.0-1_all.deb
+sudo apt install ../lan-route-fixer_2.5.0-1_all.deb
 ```
 
 安装后：
 
 - CLI：`lan-route-fixer scan|check|fix|list|status|doctor|prune|daemon|config ...`
+- TUI：在终端里直接输入 `lan-route-fixer`（不带参数）就打开全屏控制台
 - GUI：应用菜单打开「局域网路由修复」
 - 后台：`lan-route-fixer-daemon.service`（事件驱动，实测约 0.33 秒修复）
   + `lan-route-fixer.timer`（60 秒兜底）+ NetworkManager dispatcher
@@ -184,6 +185,9 @@ sudo apt install ../lan-route-fixer_2.2.0-1_all.deb
 ## 快速开始（aTrust 场景）
 
 ```sh
+# 0. 先看全貌：在终端里直接输入（不带参数）就打开全屏控制台
+lan-route-fixer
+
 # 1. 看看现在到底哪条路在抢流量
 lan-route-fixer doctor
 
@@ -230,6 +234,47 @@ lan-route-fixer add 192.168.4.19 --name "家里局域网" --expand
       启用 routing_mode=rule 或保持守护进程运行可避免
 ```
 
+## TUI 控制台
+
+在终端里直接输入 `lan-route-fixer`（带参数则按子命令执行，`lan-route-fixer tui`
+也可以显式打开）就会进入全屏控制台：左边是每台目标的卡片
+（`SECURED` / `CAPTURED` / `NO ROUTE` / `OFF`），右边是路由完整性雷达和
+`TARGETS / SECURED / CAPTURED` 计数、网卡/隧道/aTrust/权限/看门狗/路由数，
+底部是事件流和快捷键。日常操作不用记子命令。
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│   LAN ROUTE FIXER    //  A T R U S T   D E F E N S E   G R I D │
+├────────────────────────────────┬─────────────────────────────┤
+│ ▌ 4090-1              SECURED  │       ROUTE INTEGRITY       │
+│   192.168.4.94/32              │             TARGETS 03      │
+│   WLAN  ──▸ WLAN               │             SECURED 03      │
+│   challenge_4090     CAPTURED  │             CAPTURED 00     │
+│   192.168.4.234/32             │      ·····▸·····            │
+│   WLAN  ──▸ aTrustVNIC         │                             │
+└────────────────────────────────┴─────────────────────────────┘
+```
+
+| 键 | 动作 |
+| --- | --- |
+| `↑` `↓` | 选择目标；`↵` 打开详情（期望网卡、当前网卡、覆盖它的更宽前缀、路由/规则状态） |
+| `s` | 重新扫描（目标、网卡、看门狗状态一起刷新） |
+| `f` | 修复选中目标（未选中则修全部）；需要提权时自动走 `pkexec` |
+| `i` | 从 `~/.ssh/config` 导入局域网主机：先预演，按 `y` 才写入 |
+| `d` | 诊断（等价于 `doctor`，结果显示在浮层里） |
+| `w` | 看门狗：安装/卸载后台自动修复，状态显示在 `WATCHDOG` 行 |
+| `?` | 帮助浮层；`Esc` 关闭浮层；`q` 或 `Ctrl-C` 退出 |
+
+几点说明：
+
+- 只依赖标准库（不用 `curses`），所以 Windows 终端里也能跑；宽度小于 92 列
+  自动切紧凑布局，小于 60×12 直接提示「窗口太小」。
+- **只读优先**：只有 `f`（修复）、`i` 里按 `y` 的写入、`w` 的安装会改系统，
+  其余动作都只是看。
+- 有参数时仍然是普通 CLI（`lan-route-fixer status` 等）；桌面启动器没有 tty，
+  仍然打开 GTK 界面。想强制其中一个：`LAN_ROUTE_FIXER_GUI=1 lan-route-fixer`
+  强制 GTK，`lan-route-fixer tui` 强制终端界面。
+
 ## 命令参考
 
 | 命令 | 说明 |
@@ -244,6 +289,7 @@ lan-route-fixer add 192.168.4.19 --name "家里局域网" --expand
 | `list / add / remove / enable / disable / set-interface` | 目标管理 |
 | `config show\|get\|set\|paths` | 读写配置项 |
 | `run [--once]` | 2.0.x 的前台循环（保留，等价于 `daemon`） |
+| `tui [--interval N]` | 全屏终端控制台；终端里不带参数的 `lan-route-fixer` 默认打开它 |
 
 常用配置项：
 
@@ -479,6 +525,7 @@ src/usr/lib/lan-route-fixer/lanrf/             可复用实现
     helper.py       提权边界内部（校验 + 改内核）
     system.py       多配置文件协调（systemd / dispatcher）
     daemon.py       事件驱动修复循环（select 模式 + GLib/D-Bus 模式）
+    tui.py          全屏终端控制台（纯标准库，Windows 终端也能跑）
     dbus.py         控制接口（服务端 + 客户端，失败即降级）
     doctor.py       诊断
     cli.py          命令行
