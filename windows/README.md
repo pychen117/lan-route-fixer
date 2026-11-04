@@ -9,7 +9,12 @@ Windows 的构建、exe 与独立工具。Python 后端本身在 `src/usr/lib/la
 | `fix-lan.cmd` | **一键入口**：双击即可（自动请求管理员权限），跑完自动显示状态。也接受 `status` / `apply` / `remove` / `watch` / `install` / `uninstall` 参数 |
 | `pin-lan.ps1` | 独立可用的 PowerShell 工具：读 `~/.ssh/config`，给局域网主机加 `/32` 主机路由，让它们不再被 aTrust / EasyConnect 的隧道抢走 |
 | `entry.py` | PyInstaller 打包入口，把整个 CLI 冻成单文件 `lan-route-fixer.exe` |
-| `build-exe.cmd` | 双击构建 exe（需要 Python 3.10+，按需安装 PyInstaller），产物在 `dist\windows\` |
+| `gui_entry.py` | GUI 的 PyInstaller 入口：不带参数开界面，`--task-install` 装计划任务，其余参数原样交给 CLI |
+| `gui.py` | tkinter 写的深色仪表盘：目标卡片、路由完整性雷达、事件流、FIX / IMPORT / DIAGNOSE / WATCHDOG |
+| `taskmod.py` | 登录计划任务 `LanRouteFixer` 的注册与移除（以最高权限运行 `run --interval 10`） |
+| `lanrf.ico` | 界面窗口与两个 exe 的图标 |
+| `build-exe.cmd` | 双击构建命令行 exe（需要 Python 3.10+，按需安装 PyInstaller），产物在 `dist\windows\` |
+| `build-gui.cmd` | 双击构建 GUI exe，产物在 `dist\windows\lan-route-fixer-gui.exe` |
 | `probe_winapi.py` | 只读探针：用 ctypes 调 IP Helper API，打印路由表、地址表、网卡表，用来核对结构体布局与真实行为 |
 
 ## 为什么会丢流量
@@ -111,6 +116,37 @@ Get-ScheduledTask -TaskName LanRouteFixer | Format-List
 
 onefile 版启动时会解压到 `%TEMP%`；如果临时目录被安全策略锁死，把
 `build-exe.cmd` 里的 `--onefile` 换成 `--onedir`。
+
+## 图形界面（GUI）
+
+`lan-route-fixer-gui.exe` 是同一个项目的界面版本：双击打开，不弹控制台。
+它把 `status` / `fix` / `import-ssh` / `doctor` / 计划任务全部做成按钮，
+写路由和装任务时会自己走 UAC 提权，其余操作保持只读。
+
+```powershell
+.\dist\windows\lan-route-fixer-gui.exe            # 打开界面
+.\dist\windows\lan-route-fixer-gui.exe status     # 命令行模式仍可用
+.\dist\windows\lan-route-fixer-gui.exe --task-install   # 装登录任务（需管理员）
+```
+
+界面顶部是品牌栏与权限胶囊（`ADMINISTRATOR` / `STANDARD USER`），左侧是
+SSH 目标卡片（`SECURED` / `CAPTURED` / `NO LINK`），右上是路由完整性雷达，
+右下是网卡 / 隧道 / aTrust / 计划任务读数，底部是事件流与五个按钮。
+`F5` 等同于 `SCAN`。
+
+自己构建：双击 `build-gui.cmd`，或者手动执行：
+
+```powershell
+python -m PyInstaller --noconfirm --clean --onefile --windowed `
+    --name lan-route-fixer-gui `
+    --icon windows\lanrf.ico --add-data "windows\lanrf.ico;." `
+    --paths src\usr\lib\lan-route-fixer `
+    --distpath dist\windows --workpath build\windows --specpath build\windows `
+    windows\gui_entry.py
+```
+
+窗口程序没有控制台，所以 `--version` 之类的输出只会进日志文件/空设备；
+需要看输出时直接用命令行 exe 或 `python -B src\usr\bin\lan-route-fixer`。
 
 ## 它怎么判断“物理网卡”
 

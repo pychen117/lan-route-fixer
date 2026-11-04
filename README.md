@@ -448,8 +448,13 @@ debian/                                        Debian 打包
 windows/                                       Windows 构建与独立工具
     fix-lan.cmd        一键入口（自动请求管理员权限）
     pin-lan.ps1        独立 PowerShell 工具（status/apply/remove/watch/install）
-    entry.py           PyInstaller 入口（打进单文件 exe）
-    build-exe.cmd      构建 Windows 单文件可执行程序
+    entry.py           PyInstaller 入口（命令行 exe）
+    gui_entry.py       PyInstaller 入口（GUI / 任务 / CLI 三合一）
+    gui.py             tkinter 控制台界面（科技风仪表盘）
+    taskmod.py         登录计划任务（LanRouteFixer）的安装与移除
+    lanrf.ico          GUI 与 exe 的图标
+    build-exe.cmd      构建命令行单文件 exe
+    build-gui.cmd      构建 GUI 单文件 exe
     probe_winapi.py    只读探针（核对结构体尺寸与真实选路）
     README.md          Windows 工具的使用说明
 src/usr/bin/lan-route-fixer                    入口（CLI / GUI 分发）
@@ -549,6 +554,29 @@ lan-route-fixer.exe doctor
 PyInstaller），产物在 `dist\windows\lan-route-fixer.exe`。onefile 版启动时会解压
 到 `%TEMP%`；如果那台机器的临时目录被安全策略锁死，把构建命令里的 `--onefile`
 换成 `--onedir`。
+
+### 图形界面
+
+同一个 Release 里还有 `lan-route-fixer-gui.exe`：双击直接打开控制台界面，
+不用记命令。界面是深色「雷达」风格，实时显示每台 SSH 主机到底走物理网卡还是
+被 aTrust 的隧道接管，并提供：
+
+- **SCAN**：重新读取路由表与网卡状态（F5 同效）；
+- **FIX ROUTES**：写入 `/32` 主机路由；未提权时自动通过 UAC 重新启动自己；
+- **IMPORT SSH**：从 `~/.ssh/config` 预览并导入局域网主机；
+- **DIAGNOSE**：运行 `doctor` 的诊断项并在对话框里展示；
+- **WATCHDOG**：注册/移除登录计划任务（以管理员身份运行
+  `lan-route-fixer-gui.exe run --interval 10`），aTrust 重连后自动补回路由。
+
+```powershell
+lan-route-fixer-gui.exe            # 打开界面
+lan-route-fixer-gui.exe --version  # 仍然是同一个二进制
+lan-route-fixer-gui.exe status     # 命令行模式完全可用
+```
+
+自己构建：双击 `windows\build-gui.cmd`，产物在
+`dist\windows\lan-route-fixer-gui.exe`（窗口程序，没有控制台；CLI 模式下的输出
+仍然有效，只是不显示在窗口里）。
 
 ### 路径
 

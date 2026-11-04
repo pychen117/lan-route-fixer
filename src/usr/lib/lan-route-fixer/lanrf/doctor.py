@@ -53,7 +53,7 @@ def _windows_environment(backend):
             ""
             if privileged
             else "以「管理员身份」打开 PowerShell 后运行 fix，或执行 "
-            "tools\\windows\\pin-lan.ps1 -Action install 注册登录计划任务",
+            "windows\\pin-lan.ps1 -Action install 注册登录计划任务",
         )
     )
     provider = getattr(backend, "tunnel_interfaces", None)
@@ -357,7 +357,7 @@ def diagnose_background(backend):
                 "没有后台守护进程状态",
                 "未找到 state.json",
                 "以管理员身份运行 `lan-route-fixer run --interval 10`，"
-                "或执行 tools\\windows\\pin-lan.ps1 -Action install 注册登录计划任务，"
+                "或执行 windows\\pin-lan.ps1 -Action install 注册登录计划任务，"
                 "否则路由只能靠手动 fix"
                 if backend.name == "windows"
                 else "启用 `systemctl enable --now lan-route-fixer-daemon.service`，"
@@ -384,7 +384,7 @@ def diagnose_background(backend):
                     "没有登录计划任务",
                     "LanRouteFixer 未注册（或查询需要权限）",
                     "管理员 PowerShell 中执行 "
-                    "tools\\windows\\pin-lan.ps1 -Action install；"
+                    "windows\\pin-lan.ps1 -Action install；"
                     "或前台运行 lan-route-fixer run --interval 10",
                 )
             )

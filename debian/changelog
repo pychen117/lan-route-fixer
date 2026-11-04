@@ -1,3 +1,19 @@
+lan-route-fixer (2.4.0-1) unstable; urgency=medium
+
+  * Add a Windows GUI control deck: windows/gui.py (tkinter tech-styled
+    dashboard with route-integrity radar, per-target cards, live event
+    stream and one-click scan/fix/import/doctor/watchdog actions),
+    windows/gui_entry.py (single entry that opens the GUI, runs the CLI
+    or configures the logon task), windows/taskmod.py, windows/lanrf.ico
+    and windows/build-gui.cmd.
+  * The GUI re-launches itself elevated through UAC only for the actions
+    that write the routing table or register the scheduled task.
+  * The GUI executable doubles as the CLI and as the watchdog runner:
+    lan-route-fixer-gui.exe run --interval 10.
+  * Doctor hints now point at the windows/ layout.
+
+ -- pychen117 <pychen117@163.com>  Wed, 04 Nov 2026 15:10:00 +0800
+
 lan-route-fixer (2.3.2-1) unstable; urgency=medium
 
   * Make Windows a top-level platform directory, parallel to debian/,
