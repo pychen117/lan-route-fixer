@@ -1,11 +1,15 @@
-# Windows 工具
+# Windows 工具与构建
 
-这个目录放两类东西：
+这个目录与仓库根的 `debian/` 平行：`debian/` 管 Linux 打包，`windows/` 管
+Windows 的构建、exe 与独立工具。Python 后端本身在 `src/usr/lib/lan-route-fixer/lanrf/`
+里（`winapi.py` + `windows.py`），两个平台共用同一套 `reconcile` 决策层。
 
 | 文件 | 用途 |
 | --- | --- |
 | `fix-lan.cmd` | **一键入口**：双击即可（自动请求管理员权限），跑完自动显示状态。也接受 `status` / `apply` / `remove` / `watch` / `install` / `uninstall` 参数 |
 | `pin-lan.ps1` | 独立可用的 PowerShell 工具：读 `~/.ssh/config`，给局域网主机加 `/32` 主机路由，让它们不再被 aTrust / EasyConnect 的隧道抢走 |
+| `entry.py` | PyInstaller 打包入口，把整个 CLI 冻成单文件 `lan-route-fixer.exe` |
+| `build-exe.cmd` | 双击构建 exe（需要 Python 3.10+，按需安装 PyInstaller），产物在 `dist\windows\` |
 | `probe_winapi.py` | 只读探针：用 ctypes 调 IP Helper API，打印路由表、地址表、网卡表，用来核对结构体布局与真实行为 |
 
 ## 为什么会丢流量
@@ -28,7 +32,7 @@ metric，于是：
 
 ## 快速开始
 
-**最简单：双击 `tools\windows\fix-lan.cmd`。** 它会自己弹 UAC 提权、写入三条
+**最简单：双击 `windows\fix-lan.cmd`。** 它会自己弹 UAC 提权、写入三条
 `/32` 路由、再打印一遍状态，最后停住等你按键。日常只需要这一个文件。
 
 也可以在命令行里调用（Windows 自带的 PowerShell 5.1 用 `powershell`，
@@ -36,16 +40,16 @@ metric，于是：
 
 ```powershell
 # 一条命令完成修复 + 验证
-.\tools\windows\fix-lan.cmd
+.\windows\fix-lan.cmd
 
 # 只看现状（不需要管理员）
-.\tools\windows\fix-lan.cmd status
+.\windows\fix-lan.cmd status
 ```
 
 等价于直接调用 `pin-lan.ps1`：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\windows\pin-lan.ps1 -Action status
+powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\pin-lan.ps1 -Action status
 ```
 
 `status` 输出会把 6 台 SSH 主机列出来：落在物理网段里的标 `pin`（还差一条主机路由），
@@ -57,15 +61,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\windows\pin-lan.ps1 
 ```powershell
 # 以管理员身份打开 PowerShell，然后：
 Set-ExecutionPolicy -Scope Process Bypass -Force
-.\tools\windows\pin-lan.ps1 -Action apply
+.\windows\pin-lan.ps1 -Action apply
 ```
 
 取消：
 
 ```powershell
-.\tools\windows\pin-lan.ps1 -Action remove
+.\windows\pin-lan.ps1 -Action remove
 # 或者一键入口：
-.\tools\windows\fix-lan.cmd remove
+.\windows\fix-lan.cmd remove
 ```
 
 ### 掉线后自动补回来
@@ -74,12 +78,12 @@ aTrust 重连、DHCP 续租、Wi-Fi 切换都可能清掉主机路由。两种�
 
 ```powershell
 # 方式一：前台守护（关掉窗口就停）
-.\tools\windows\pin-lan.ps1 -Action watch -WatchInterval 10
+.\windows\pin-lan.ps1 -Action watch -WatchInterval 10
 
 # 方式二：注册登录计划任务（管理员，开机登录后自动以最高权限常驻）
-.\tools\windows\pin-lan.ps1 -Action install
+.\windows\pin-lan.ps1 -Action install
 Get-ScheduledTask -TaskName LanRouteFixer | Format-List
-.\tools\windows\pin-lan.ps1 -Action uninstall   # 取消
+.\windows\pin-lan.ps1 -Action uninstall   # 取消
 ```
 
 `watch` 每 `-WatchInterval` 秒重新规划一次，只在状态变化时打印一行，平时安静。
@@ -94,6 +98,19 @@ Get-ScheduledTask -TaskName LanRouteFixer | Format-List
 | `-AsJson` | `status` 输出 JSON，便于脚本消费 |
 
 退出码：`0` 正常，`1` 出错（含未提权时执行 `apply` / `watch` / `install`）。
+
+## 打包成 exe
+
+不想装 Python 的机器直接用 Release 里的 `lan-route-fixer.exe`；要自己构建就双击
+`build-exe.cmd`（会按需安装 PyInstaller），产物在 `dist\windows\`：
+
+```powershell
+.\dist\windows\lan-route-fixer.exe status
+.\dist\windows\lan-route-fixer.exe fix     # 管理员 PowerShell
+```
+
+onefile 版启动时会解压到 `%TEMP%`；如果临时目录被安全策略锁死，把
+`build-exe.cmd` 里的 `--onefile` 换成 `--onedir`。
 
 ## 它怎么判断“物理网卡”
 
@@ -141,7 +158,7 @@ python -B src\usr\bin\lan-route-fixer fix
 只读探针，不写任何东西：
 
 ```powershell
-python -B tools\windows\probe_winapi.py
+python -B windows\probe_winapi.py
 ```
 
 会打印结构体尺寸、前向表行数、每块网卡的 ifIndex/名称/描述/IfType/状态/地址，

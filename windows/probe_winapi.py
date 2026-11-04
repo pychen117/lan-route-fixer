@@ -4,7 +4,7 @@ Purpose: confirm on a real Windows box that the structures and calls the
 Windows backend wants to use actually work, and print what they return.
 This script never mutates anything: it calls only Get* APIs.
 
-Run:  python -B tools/windows/probe_winapi.py [destination ...]
+Run:  python -B windows/probe_winapi.py [destination ...]
 """
 
 import ctypes

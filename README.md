@@ -440,7 +440,18 @@ sudo bash tools/verify-install
 
 ## 项目结构
 
+Linux 和 Windows 是**平行的两个平台目录**：`debian/` 管 Debian 打包，
+`windows/` 管 Windows 构建、exe 与独立工具；Python 实现只有一份，在 `src/`。
+
 ```
+debian/                                        Debian 打包
+windows/                                       Windows 构建与独立工具
+    fix-lan.cmd        一键入口（自动请求管理员权限）
+    pin-lan.ps1        独立 PowerShell 工具（status/apply/remove/watch/install）
+    entry.py           PyInstaller 入口（打进单文件 exe）
+    build-exe.cmd      构建 Windows 单文件可执行程序
+    probe_winapi.py    只读探针（核对结构体尺寸与真实选路）
+    README.md          Windows 工具的使用说明
 src/usr/bin/lan-route-fixer                    入口（CLI / GUI 分发）
 src/usr/lib/lan-route-fixer/app.py             GTK4 / libadwaita 界面（侧栏单窗口）
 src/usr/lib/lan-route-fixer/core.py            兼容层（保留 2.0.x 的 core.* 名字）
@@ -475,12 +486,6 @@ tools/verify-namespace                          真实内核验证（无需 root
 tools/gui-smoke                                 GTK 控件树冒烟测试（无需人点击）
 tools/gui-screenshot                            把每一页渲染成 PNG
 tools/plan-preview                              只读预览将要执行的 ip 命令
-tools/windows/pin-lan.ps1                       独立 PowerShell 工具（status/apply/remove/watch/install）
-tools/windows/fix-lan.cmd                       一键入口（自动请求管理员权限）
-tools/windows/entry.py                          PyInstaller 入口（打进单文件 exe）
-tools/windows/build-exe.cmd                     构建 Windows 单文件可执行程序
-tools/windows/probe_winapi.py                   只读探针（核对结构体尺寸与真实选路）
-tools/windows/README.md                         Windows 工具的使用说明
 tests/                                          单元测试（含假后端）
 ```
 
@@ -499,9 +504,9 @@ Windows 上的失败模式和 Linux 一样，只是内核接口不同：aTrust �
 
 ### 用法
 
-只想马上修好、不装 Python？双击 `tools\windows\fix-lan.cmd` 即可（自动请求
+只想马上修好、不装 Python？双击 `windows\fix-lan.cmd` 即可（自动请求
 管理员权限，写完 `/32` 路由再显示状态）。它的 `status` / `apply` / `remove` /
-`watch` / `install` 子命令见 [tools/windows/README.md](tools/windows/README.md)。
+`watch` / `install` 子命令见 [windows/README.md](windows/README.md)。
 
 用项目自带 CLI 的话：
 
@@ -523,9 +528,9 @@ python -B src\usr\bin\lan-route-fixer run --interval 10
 python -B src\usr\bin\lan-route-fixer doctor
 ```
 
-`tools/windows/pin-lan.ps1` 是不需要 Python 的等价实现
+`windows/pin-lan.ps1` 是不需要 Python 的等价实现
 （`status` / `apply` / `remove` / `watch` / `install`），用法见
-[tools/windows/README.md](tools/windows/README.md)。
+[windows/README.md](windows/README.md)。
 
 ### 可执行文件（Release 附件）
 
@@ -540,7 +545,7 @@ lan-route-fixer.exe run --interval 10 # 管理员：常驻轮询修复
 lan-route-fixer.exe doctor
 ```
 
-自己构建：双击 `tools\windows\build-exe.cmd`（需要 Python 3.10+，脚本会按需装
+自己构建：双击 `windows\build-exe.cmd`（需要 Python 3.10+，脚本会按需装
 PyInstaller），产物在 `dist\windows\lan-route-fixer.exe`。onefile 版启动时会解压
 到 `%TEMP%`；如果那台机器的临时目录被安全策略锁死，把构建命令里的 `--onefile`
 换成 `--onedir`。

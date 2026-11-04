@@ -1,6 +1,6 @@
 """Entry point for the PyInstaller build of lan-route-fixer.
 
-``tools/windows/build-exe.cmd`` freezes this module into
+``windows/build-exe.cmd`` freezes this module into
 ``lan-route-fixer.exe``.  The frozen executable is the same command line as
 ``src/usr/bin/lan-route-fixer``: ``status``, ``import-ssh``, ``fix``,
 ``run``, ``daemon`` and ``doctor`` all work without Python installed.

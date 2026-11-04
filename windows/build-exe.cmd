@@ -1,6 +1,6 @@
 @echo off
 setlocal
-cd /d "%~dp0..\.."
+cd /d "%~dp0.."
 set "ROOT=%CD%"
 
 where python >nul 2>nul || (
@@ -26,7 +26,7 @@ python -m PyInstaller --noconfirm --clean --onefile ^
     --distpath "%ROOT%\dist\windows" ^
     --workpath "%ROOT%\build\windows" ^
     --specpath "%ROOT%\build\windows" ^
-    "%ROOT%\tools\windows\entry.py"
+    "%ROOT%\windows\entry.py"
 if errorlevel 1 (
     echo ERROR: PyInstaller build failed.
     pause

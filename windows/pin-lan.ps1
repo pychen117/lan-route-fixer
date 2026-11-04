@@ -28,16 +28,16 @@
       uninstall  remove the scheduled task
 
 .EXAMPLE
-    powershell -NoProfile -ExecutionPolicy Bypass -File tools\windows\pin-lan.ps1 -Action status
+    powershell -NoProfile -ExecutionPolicy Bypass -File windows\pin-lan.ps1 -Action status
 
 .EXAMPLE
     # One-click wrapper (self-elevates through UAC):
-    .\tools\windows\fix-lan.cmd
+    .\windows\fix-lan.cmd
 
 .EXAMPLE
     # Elevated PowerShell:
     Set-ExecutionPolicy -Scope Process Bypass -Force
-    .\tools\windows\pin-lan.ps1 -Action apply
+    .\windows\pin-lan.ps1 -Action apply
 
 .NOTES
     ASCII-only on purpose: Windows PowerShell 5.1 reads .ps1 files in the

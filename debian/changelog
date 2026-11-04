@@ -1,3 +1,16 @@
+lan-route-fixer (2.3.2-1) unstable; urgency=medium
+
+  * Make Windows a top-level platform directory, parallel to debian/,
+    instead of nesting it inside tools/. windows/ now owns entry.py,
+    build-exe.cmd, pin-lan.ps1, fix-lan.cmd, probe_winapi.py and the
+    Windows tools README; tools/ keeps only the POSIX verification and
+    GUI helpers. The Python backends (winapi.py, windows.py) stay in
+    lanrf/ because both platforms share the same package and reconcile
+    engine.
+  * No functional change.
+
+ -- pychen117 <pychen117@163.com>  Wed, 04 Nov 2026 14:52:00 +0800
+
 lan-route-fixer (2.3.1-1) unstable; urgency=medium
 
   * Ship a Windows executable. tools/windows/entry.py plus a PyInstaller
